@@ -1,0 +1,245 @@
+cmake_minimum_required(VERSION 3.20)
+project(privacy_pass VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Options
+option(PRIVACY_PASS_BUILD_TESTS "Build unit tests" ON)
+option(PRIVACY_PASS_BUILD_BENCHMARKS "Build benchmarks" ON)
+option(PRIVACY_PASS_BUILD_MOQ "Build MOQ extension" ON)
+option(PRIVACY_PASS_ENABLE_SANITIZERS "Enable address and undefined sanitizers" OFF)
+
+# Compiler flags
+add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+
+if(PRIVACY_PASS_ENABLE_SANITIZERS)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
+# Dependencies
+find_package(OpenSSL REQUIRED)
+
+include(FetchContent)
+
+# Fetch spdlog
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG v1.12.0
+)
+FetchContent_MakeAvailable(spdlog)
+
+# Fetch doctest if building tests
+if(PRIVACY_PASS_BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+        doctest
+        GIT_REPOSITORY https://github.com/doctest/doctest.git
+        GIT_TAG v2.4.12
+    )
+    FetchContent_MakeAvailable(doctest)
+endif()
+
+# Fetch Google Benchmark if building benchmarks
+if(PRIVACY_PASS_BUILD_BENCHMARKS)
+    include(FetchContent)
+    FetchContent_Declare(
+        benchmark
+        GIT_REPOSITORY https://github.com/google/benchmark.git
+        GIT_TAG v1.8.3
+    )
+    set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(benchmark)
+endif()
+
+# Core library
+add_library(privacy_pass_core
+    src/core/types.cpp
+    src/core/token_challenge.cpp
+    src/core/token_request.cpp
+    src/core/token_response.cpp
+    src/core/token.cpp
+    src/core/serialization.cpp
+)
+
+target_include_directories(privacy_pass_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(privacy_pass_core PUBLIC
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+
+target_link_libraries(privacy_pass_core PRIVATE
+    spdlog::spdlog
+)
+
+# Crypto library
+add_library(privacy_pass_crypto
+    src/crypto/blind_rsa.cpp
+    src/crypto/voprf.cpp
+    src/crypto/hash.cpp
+    src/crypto/random.cpp
+)
+
+target_link_libraries(privacy_pass_crypto PUBLIC
+    privacy_pass_core
+)
+target_link_libraries(privacy_pass_crypto PRIVATE spdlog::spdlog)
+
+# HTTP layer
+add_library(privacy_pass_http
+    src/http/auth_scheme.cpp
+    src/http/header_parser.cpp
+)
+
+target_link_libraries(privacy_pass_http PUBLIC
+    privacy_pass_core
+)
+target_link_libraries(privacy_pass_http PRIVATE spdlog::spdlog)
+
+# Client library
+add_library(privacy_pass_client
+    src/core/client.cpp
+)
+
+target_link_libraries(privacy_pass_client PUBLIC
+    privacy_pass_core
+    privacy_pass_crypto
+)
+target_link_libraries(privacy_pass_client PRIVATE spdlog::spdlog)
+
+# Issuer library
+add_library(privacy_pass_issuer
+    src/core/issuer.cpp
+)
+
+target_link_libraries(privacy_pass_issuer PUBLIC
+    privacy_pass_core
+    privacy_pass_crypto
+)
+target_link_libraries(privacy_pass_issuer PRIVATE spdlog::spdlog)
+
+# Origin library
+add_library(privacy_pass_origin
+    src/core/origin.cpp
+)
+
+target_link_libraries(privacy_pass_origin PUBLIC
+    privacy_pass_core
+    privacy_pass_crypto
+)
+target_link_libraries(privacy_pass_origin PRIVATE spdlog::spdlog)
+
+# MOQ extension library (optional)
+if(PRIVACY_PASS_BUILD_MOQ)
+    add_library(privacy_pass_moq
+        src/moq/auth_scope.cpp
+        src/moq/authorization_info.cpp
+        src/moq/moq_client.cpp
+        src/moq/moq_relay.cpp
+    )
+
+    target_link_libraries(privacy_pass_moq PUBLIC
+        privacy_pass_client
+        privacy_pass_issuer
+        privacy_pass_origin
+    )
+    target_link_libraries(privacy_pass_moq PRIVATE spdlog::spdlog)
+endif()
+
+# Combined library target
+add_library(privacy_pass INTERFACE)
+target_link_libraries(privacy_pass INTERFACE
+    privacy_pass_core
+    privacy_pass_crypto
+    privacy_pass_http
+    privacy_pass_client
+    privacy_pass_issuer
+    privacy_pass_origin
+)
+if(PRIVACY_PASS_BUILD_MOQ)
+    target_link_libraries(privacy_pass INTERFACE privacy_pass_moq)
+endif()
+
+# Tests
+if(PRIVACY_PASS_BUILD_TESTS)
+    enable_testing()
+
+    set(TEST_SOURCES
+        tests/test_main.cpp
+        tests/test_types.cpp
+        tests/test_serialization.cpp
+        tests/test_crypto.cpp
+        tests/test_blind_rsa.cpp
+        tests/test_voprf.cpp
+        tests/test_token_challenge.cpp
+        tests/test_token_request.cpp
+        tests/test_token.cpp
+        tests/test_client.cpp
+        tests/test_issuer.cpp
+        tests/test_origin.cpp
+        tests/test_integration.cpp
+        tests/test_http.cpp
+    )
+    if(PRIVACY_PASS_BUILD_MOQ)
+        list(APPEND TEST_SOURCES tests/test_moq.cpp)
+    endif()
+
+    add_executable(privacy_pass_tests ${TEST_SOURCES})
+
+    target_link_libraries(privacy_pass_tests PRIVATE
+        privacy_pass
+        doctest::doctest
+    )
+
+    add_test(NAME privacy_pass_tests COMMAND privacy_pass_tests)
+endif()
+
+# Benchmarks
+if(PRIVACY_PASS_BUILD_BENCHMARKS)
+    add_executable(privacy_pass_benchmarks
+        benchmarks/bench_main.cpp
+        benchmarks/bench_crypto.cpp
+        benchmarks/bench_token_issuance.cpp
+        benchmarks/bench_serialization.cpp
+    )
+
+    target_link_libraries(privacy_pass_benchmarks PRIVATE
+        privacy_pass
+        benchmark::benchmark
+    )
+endif()
+
+# Examples
+add_executable(example_basic_flow examples/basic_flow.cpp)
+target_link_libraries(example_basic_flow PRIVATE privacy_pass)
+
+# Install (simplified - without export)
+include(GNUInstallDirs)
+
+set(INSTALL_TARGETS
+    privacy_pass_core
+    privacy_pass_crypto
+    privacy_pass_http
+    privacy_pass_client
+    privacy_pass_issuer
+    privacy_pass_origin
+)
+if(PRIVACY_PASS_BUILD_MOQ)
+    list(APPEND INSTALL_TARGETS privacy_pass_moq)
+endif()
+
+install(TARGETS ${INSTALL_TARGETS}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
