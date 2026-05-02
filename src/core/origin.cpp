@@ -136,7 +136,7 @@ Result<TokenChallenge> PublicOrigin::create_challenge(
         if (!random) {
             return std::unexpected(random.error());
         }
-        ChallengeDigest context;
+        ChallengeDigest context{};
         std::copy(random->begin(), random->end(), context.begin());
         redemption_context = context;
     }
@@ -266,7 +266,7 @@ Result<TokenChallenge> PrivateOrigin::create_challenge(
         if (!random) {
             return std::unexpected(random.error());
         }
-        ChallengeDigest context;
+        ChallengeDigest context{};
         std::copy(random->begin(), random->end(), context.begin());
         redemption_context = context;
     }
@@ -385,7 +385,7 @@ Result<TokenChallenge> Origin::create_challenge(
         if (!random) {
             return std::unexpected(random.error());
         }
-        ChallengeDigest context;
+        ChallengeDigest context{};
         std::copy(random->begin(), random->end(), context.begin());
         redemption_context = context;
     }
