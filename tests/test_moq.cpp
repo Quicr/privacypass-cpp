@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 Cisco Systems
 // SPDX-License-Identifier: BSD-2-Clause
 #include <doctest/doctest.h>
-#include <privacy_pass/moq/client.hpp>
-#include <privacy_pass/moq/relay.hpp>
+#include <privacy_pass/extensions/moq.hpp>
+#include <privacy_pass/core/token_provider.hpp>
+#include <privacy_pass/core/token_authenticator.hpp>
 
 using namespace privacy_pass;
 using namespace privacy_pass::moq;
@@ -241,87 +242,165 @@ TEST_SUITE("AuthorizationInfo") {
     }
 }
 
-TEST_SUITE("VerificationResult") {
-    TEST_CASE("Success") {
-        auto info = AuthorizationInfo::for_relay();
-        auto result = VerificationResult::success(std::move(info));
+TEST_SUITE("TokenProvider") {
+    TEST_CASE("Configuration") {
+        TokenProviderConfig config{
+            .max_cached_tokens = 50,
+            .token_prefetch_threshold = std::chrono::seconds(120),
+        };
 
-        CHECK(result.valid);
-        CHECK(!result.error_code.has_value());
-        CHECK(result.authorization_info.has_value());
+        TokenProvider provider(config);
+        CHECK(provider.config().max_cached_tokens == 50);
     }
 
-    TEST_CASE("Failure") {
-        auto result = VerificationResult::failure(
-            MoqErrorCode::TOKEN_INVALID,
-            "Invalid signature");
+    TEST_CASE("Issuer management") {
+        TokenProvider provider;
 
-        CHECK(!result.valid);
-        REQUIRE(result.error_code.has_value());
-        CHECK(*result.error_code == MoqErrorCode::TOKEN_INVALID);
-        CHECK(result.error_message.has_value());
+        CHECK(!provider.has_issuer("test.example.com"));
+
+        PublicKey key{
+            .type = TokenType::BLIND_RSA,
+            .data = {0x01, 0x02, 0x03},
+            .key_id = {},
+        };
+
+        provider.add_issuer_key("test.example.com", key);
+        CHECK(provider.has_issuer("test.example.com"));
+
+        provider.remove_issuer("test.example.com");
+        CHECK(!provider.has_issuer("test.example.com"));
+    }
+
+    TEST_CASE("Token caching") {
+        TokenProvider provider;
+
+        ChallengeDigest digest{};
+        digest.fill(0x42);
+
+        CHECK(provider.cached_token_count(digest) == 0);
+
+        // Create a dummy token
+        Token token{
+            .token_type = TokenType::BLIND_RSA,
+            .nonce = {},
+            .challenge_digest = digest,
+            .token_key_id = {},
+            .authenticator = {},
+        };
+
+        provider.store_tokens(digest, {token});
+        CHECK(provider.cached_token_count(digest) == 1);
+
+        auto retrieved = provider.get_cached_token(digest);
+        CHECK(retrieved.has_value());
+        CHECK(provider.cached_token_count(digest) == 0);
+
+        provider.clear_cache();
     }
 }
 
-TEST_SUITE("MoqRelay") {
-    TEST_CASE("Create challenge with authorization") {
-        RelayConfig config{
-            .relay_name = "relay.example.com",
+TEST_SUITE("TokenAuthenticator") {
+    TEST_CASE("Configuration") {
+        TokenAuthenticatorConfig config{
             .issuer_name = "issuer.example.com",
+            .origin_names = {"origin.example.com"},
+            .redemption_window = std::chrono::seconds(7200),
         };
 
-        MoqRelay relay(config);
+        TokenAuthenticator auth(config);
+        CHECK(auth.config().issuer_name == "issuer.example.com");
+        CHECK(auth.config().redemption_window == std::chrono::seconds(7200));
+    }
 
-        auto auth_info = AuthorizationInfo::for_subscriber({{0x01}}, {0x02});
+    TEST_CASE("Challenge creation") {
+        TokenAuthenticatorConfig config{
+            .issuer_name = "issuer.example.com",
+            .origin_names = {"origin.example.com"},
+        };
 
-        auto challenge = relay.create_challenge(
-            TokenType::BLIND_RSA,
-            auth_info);
+        TokenAuthenticator auth(config);
 
+        auto challenge = auth.create_challenge(TokenType::BLIND_RSA);
         REQUIRE(challenge.has_value());
         CHECK(challenge->token_type == TokenType::BLIND_RSA);
         CHECK(challenge->issuer_name == "issuer.example.com");
+    }
+
+    TEST_CASE("Challenge with additional origin_info") {
+        TokenAuthenticatorConfig config{
+            .issuer_name = "issuer.example.com",
+            .origin_names = {"origin.example.com"},
+        };
+
+        TokenAuthenticator auth(config);
+
+        // Encode MOQ authorization info
+        auto moq_auth = AuthorizationInfo::for_subscriber({{0x01}}, {0x02});
+        auto encoded = moq_auth.encode_for_origin_info();
+        REQUIRE(encoded.has_value());
+
+        auto challenge = auth.create_challenge(
+            TokenType::BLIND_RSA,
+            std::nullopt,
+            {*encoded});
+
+        REQUIRE(challenge.has_value());
         CHECK(!challenge->origin_info.empty());
+
+        // Verify we can decode the auth info back
+        auto decoded = AuthorizationInfo::decode_from_origin_info(challenge->origin_info[0]);
+        REQUIRE(decoded.has_value());
     }
 
-    TEST_CASE("Issuer mode") {
-        RelayConfig config{
-            .relay_name = "relay.example.com",
+    TEST_CASE("Redemption cache") {
+        TokenAuthenticatorConfig config{
             .issuer_name = "issuer.example.com",
+            .origin_names = {"origin.example.com"},
         };
 
-        MoqRelay relay(config);
+        TokenAuthenticator auth(config);
 
-        // Enable issuer mode
-        auto keypair = crypto::BlindRsaPrivateKey::generate();
-        REQUIRE(keypair.has_value());
-
-        relay.enable_issuer_mode(std::move(keypair->first));
-
-        auto keys = relay.issuer_public_keys();
-        CHECK(!keys.empty());
-    }
-
-    TEST_CASE("Config access") {
-        RelayConfig config{
-            .relay_name = "relay.example.com",
-            .issuer_name = "issuer.example.com",
-            .token_validity_window = std::chrono::seconds(7200),
+        Token token{
+            .token_type = TokenType::BLIND_RSA,
+            .nonce = {},
+            .challenge_digest = {},
+            .token_key_id = {},
+            .authenticator = {},
         };
+        token.nonce.fill(0x42);
 
-        MoqRelay relay(config);
+        CHECK(!auth.would_be_replay(token));
 
-        CHECK(relay.config().relay_name == "relay.example.com");
-        CHECK(relay.config().issuer_name == "issuer.example.com");
-        CHECK(relay.config().token_validity_window == std::chrono::seconds(7200));
+        auth.mark_redeemed(token);
+        CHECK(auth.would_be_replay(token));
+        CHECK(auth.redemption_cache_size() == 1);
+
+        auth.prune_redemption_cache();
     }
 }
 
-TEST_SUITE("MoqClient") {
-    TEST_CASE("Base client access") {
-        MoqClient client;
+TEST_SUITE("ValidationResult") {
+    TEST_CASE("Success") {
+        ChallengeDigest digest{};
+        digest.fill(0x42);
 
-        auto& base = client.base_client();
-        (void)base;  // Just verify it compiles and doesn't crash
+        auto result = ValidationResult::success(digest);
+
+        CHECK(result.valid);
+        CHECK(result);  // operator bool
+        CHECK(!result.error_code.has_value());
+        CHECK(result.challenge_digest.has_value());
+    }
+
+    TEST_CASE("Failure") {
+        auto result = ValidationResult::failure(
+            ErrorCode::TOKEN_INVALID,
+            "Invalid signature");
+
+        CHECK(!result.valid);
+        CHECK(!result);  // operator bool
+        REQUIRE(result.error_code.has_value());
+        CHECK(*result.error_code == ErrorCode::TOKEN_INVALID);
+        CHECK(result.error_message.has_value());
     }
 }

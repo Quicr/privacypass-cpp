@@ -49,11 +49,11 @@ rebuild:
 
 # Format code
 format:
-    find include src tests benchmarks -name "*.cpp" -o -name "*.hpp" | xargs clang-format -i
+    find include src tests benchmarks examples extensions -name "*.cpp" -o -name "*.hpp" | xargs clang-format -i
 
 # Check formatting
 format-check:
-    find include src tests benchmarks -name "*.cpp" -o -name "*.hpp" | xargs clang-format --dry-run --Werror
+    find include src tests benchmarks examples extensions -name "*.cpp" -o -name "*.hpp" | xargs clang-format --dry-run --Werror
 
 # Static analysis
 lint:

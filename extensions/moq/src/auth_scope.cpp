@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 Cisco Systems
 // SPDX-License-Identifier: BSD-2-Clause
-#include <privacy_pass/moq/auth_scope.hpp>
+#include <privacy_pass/extensions/moq/auth_scope.hpp>
 
 #include <spdlog/spdlog.h>
 #include <algorithm>

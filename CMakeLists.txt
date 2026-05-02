@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(PRIVACY_PASS_BUILD_TESTS "Build unit tests" ON)
 option(PRIVACY_PASS_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(PRIVACY_PASS_BUILD_MOQ "Build MOQ extension" ON)
+option(PRIVACY_PASS_BUILD_EXAMPLES "Build examples" ON)
 option(PRIVACY_PASS_ENABLE_SANITIZERS "Enable address and undefined sanitizers" OFF)
 
 # Compiler flags
@@ -137,22 +138,26 @@ target_link_libraries(privacy_pass_origin PUBLIC
 )
 target_link_libraries(privacy_pass_origin PRIVATE spdlog::spdlog)
 
-# MOQ extension library (optional)
-if(PRIVACY_PASS_BUILD_MOQ)
-    add_library(privacy_pass_moq
-        src/moq/auth_scope.cpp
-        src/moq/authorization_info.cpp
-        src/moq/moq_client.cpp
-        src/moq/moq_relay.cpp
-    )
+# Token Provider library (high-level abstraction)
+add_library(privacy_pass_provider
+    src/core/token_provider.cpp
+)
 
-    target_link_libraries(privacy_pass_moq PUBLIC
-        privacy_pass_client
-        privacy_pass_issuer
-        privacy_pass_origin
-    )
-    target_link_libraries(privacy_pass_moq PRIVATE spdlog::spdlog)
-endif()
+target_link_libraries(privacy_pass_provider PUBLIC
+    privacy_pass_client
+    privacy_pass_issuer
+)
+target_link_libraries(privacy_pass_provider PRIVATE spdlog::spdlog)
+
+# Token Authenticator library (high-level abstraction)
+add_library(privacy_pass_authenticator
+    src/core/token_authenticator.cpp
+)
+
+target_link_libraries(privacy_pass_authenticator PUBLIC
+    privacy_pass_origin
+)
+target_link_libraries(privacy_pass_authenticator PRIVATE spdlog::spdlog)
 
 # Combined library target
 add_library(privacy_pass INTERFACE)
@@ -163,9 +168,26 @@ target_link_libraries(privacy_pass INTERFACE
     privacy_pass_client
     privacy_pass_issuer
     privacy_pass_origin
+    privacy_pass_provider
+    privacy_pass_authenticator
 )
+
+# MOQ extension library (optional)
 if(PRIVACY_PASS_BUILD_MOQ)
-    target_link_libraries(privacy_pass INTERFACE privacy_pass_moq)
+    add_library(privacy_pass_moq
+        extensions/moq/src/auth_scope.cpp
+        extensions/moq/src/authorization_info.cpp
+    )
+
+    target_include_directories(privacy_pass_moq PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/extensions/moq/include>
+        $<INSTALL_INTERFACE:include>
+    )
+
+    target_link_libraries(privacy_pass_moq PUBLIC
+        privacy_pass_core
+    )
+    target_link_libraries(privacy_pass_moq PRIVATE spdlog::spdlog)
 endif()
 
 # Tests
@@ -198,6 +220,9 @@ if(PRIVACY_PASS_BUILD_TESTS)
         privacy_pass
         doctest::doctest
     )
+    if(PRIVACY_PASS_BUILD_MOQ)
+        target_link_libraries(privacy_pass_tests PRIVATE privacy_pass_moq)
+    endif()
 
     add_test(NAME privacy_pass_tests COMMAND privacy_pass_tests)
 endif()
@@ -218,8 +243,18 @@ if(PRIVACY_PASS_BUILD_BENCHMARKS)
 endif()
 
 # Examples
-add_executable(example_basic_flow examples/basic_flow.cpp)
-target_link_libraries(example_basic_flow PRIVATE privacy_pass)
+if(PRIVACY_PASS_BUILD_EXAMPLES)
+    add_executable(example_basic_flow examples/basic_flow.cpp)
+    target_link_libraries(example_basic_flow PRIVATE privacy_pass)
+
+    if(PRIVACY_PASS_BUILD_MOQ)
+        add_executable(example_moq_client examples/moq_client.cpp)
+        target_link_libraries(example_moq_client PRIVATE privacy_pass privacy_pass_moq)
+
+        add_executable(example_moq_relay examples/moq_relay.cpp)
+        target_link_libraries(example_moq_relay PRIVATE privacy_pass privacy_pass_moq)
+    endif()
+endif()
 
 # Install (simplified - without export)
 include(GNUInstallDirs)
@@ -231,6 +266,8 @@ set(INSTALL_TARGETS
     privacy_pass_client
     privacy_pass_issuer
     privacy_pass_origin
+    privacy_pass_provider
+    privacy_pass_authenticator
 )
 if(PRIVACY_PASS_BUILD_MOQ)
     list(APPEND INSTALL_TARGETS privacy_pass_moq)
@@ -243,3 +280,6 @@ install(TARGETS ${INSTALL_TARGETS}
 )
 
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+if(PRIVACY_PASS_BUILD_MOQ)
+    install(DIRECTORY extensions/moq/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+endif()

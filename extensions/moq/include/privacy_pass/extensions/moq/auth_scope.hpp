@@ -3,7 +3,7 @@
 #pragma once
 
 #include <privacy_pass/core/serialization.hpp>
-#include <privacy_pass/moq/types.hpp>
+#include <privacy_pass/extensions/moq/types.hpp>
 
 #include <vector>
 

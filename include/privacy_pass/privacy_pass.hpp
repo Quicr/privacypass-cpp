@@ -17,6 +17,10 @@
 #include <privacy_pass/core/issuer.hpp>
 #include <privacy_pass/core/origin.hpp>
 
+// High-level abstractions
+#include <privacy_pass/core/token_provider.hpp>
+#include <privacy_pass/core/token_authenticator.hpp>
+
 // Cryptographic primitives
 #include <privacy_pass/crypto/hash.hpp>
 #include <privacy_pass/crypto/random.hpp>
@@ -25,13 +29,6 @@
 
 // HTTP authentication scheme
 #include <privacy_pass/http/auth_scheme.hpp>
-
-// MOQ extension
-#include <privacy_pass/moq/types.hpp>
-#include <privacy_pass/moq/auth_scope.hpp>
-#include <privacy_pass/moq/authorization_info.hpp>
-#include <privacy_pass/moq/client.hpp>
-#include <privacy_pass/moq/relay.hpp>
 
 namespace privacy_pass {
 
