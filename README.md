@@ -1,5 +1,7 @@
 # privacypass-cpp
 
+[![CI](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml)
+
 C++ implementation of the Privacy Pass protocol (RFC 9576-9578) with optional MOQ extension support.
 
 ## Features
