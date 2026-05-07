@@ -10,8 +10,9 @@ namespace privacy_pass::http {
 namespace {
 
 // Helper to parse auth-param format: key="value" or key=token
+// Implements RFC 7230 quoted-string parsing with escape handling
 std::optional<std::pair<std::string, std::string>> parse_auth_param(std::string_view& input) {
-    // Skip whitespace
+    // Skip whitespace (OWS)
     while (!input.empty() && (input[0] == ' ' || input[0] == '\t')) {
         input.remove_prefix(1);
     }
@@ -20,14 +21,23 @@ std::optional<std::pair<std::string, std::string>> parse_auth_param(std::string_
         return std::nullopt;
     }
 
-    // Find key
+    // Find key (token characters per RFC 7230)
     size_t eq_pos = input.find('=');
-    if (eq_pos == std::string_view::npos) {
+    if (eq_pos == std::string_view::npos || eq_pos == 0) {
         return std::nullopt;
     }
 
     std::string key(input.substr(0, eq_pos));
+    // Trim trailing whitespace from key
+    while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) {
+        key.pop_back();
+    }
     input.remove_prefix(eq_pos + 1);
+
+    // Skip whitespace after '='
+    while (!input.empty() && (input[0] == ' ' || input[0] == '\t')) {
+        input.remove_prefix(1);
+    }
 
     if (input.empty()) {
         return std::nullopt;
@@ -35,26 +45,50 @@ std::optional<std::pair<std::string, std::string>> parse_auth_param(std::string_
 
     std::string value;
     if (input[0] == '"') {
-        // Quoted string
+        // Quoted string with escape handling per RFC 7230 Section 3.2.6
         input.remove_prefix(1);
-        size_t end = input.find('"');
-        if (end == std::string_view::npos) {
+        bool escaped = false;
+
+        while (!input.empty()) {
+            char c = input[0];
+            input.remove_prefix(1);
+
+            if (escaped) {
+                // Per RFC 7230, quoted-pair is "\" HTAB / SP / VCHAR / obs-text
+                value.push_back(c);
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                // End of quoted string
+                break;
+            } else {
+                value.push_back(c);
+            }
+        }
+
+        if (escaped) {
+            // Trailing backslash without following character
             return std::nullopt;
         }
-        value = std::string(input.substr(0, end));
-        input.remove_prefix(end + 1);
     } else {
-        // Token
+        // Token (unquoted)
         size_t end = 0;
-        while (end < input.size() && input[end] != ',' && input[end] != ' ') {
+        while (end < input.size() && input[end] != ',' && input[end] != ' ' && input[end] != '\t') {
             end++;
         }
         value = std::string(input.substr(0, end));
         input.remove_prefix(end);
     }
 
-    // Skip comma if present
-    while (!input.empty() && (input[0] == ',' || input[0] == ' ' || input[0] == '\t')) {
+    // Skip OWS and comma
+    while (!input.empty() && (input[0] == ' ' || input[0] == '\t')) {
+        input.remove_prefix(1);
+    }
+    if (!input.empty() && input[0] == ',') {
+        input.remove_prefix(1);
+    }
+    while (!input.empty() && (input[0] == ' ' || input[0] == '\t')) {
         input.remove_prefix(1);
     }
 

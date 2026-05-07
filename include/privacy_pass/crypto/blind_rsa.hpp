@@ -53,9 +53,10 @@ public:
     [[nodiscard]] Result<BlindingData> blind(ByteView msg) const;
 
     // Finalize: unblind the signature
+    // Note: blinding_data.inverse is cleared after successful finalization
     [[nodiscard]] Result<Bytes> finalize(
         ByteView blind_sig,
-        const BlindingData& blinding_data,
+        BlindingData& blinding_data,
         ByteView msg) const;
 
     // Verify a signature (for publicly verifiable tokens)

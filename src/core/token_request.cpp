@@ -91,6 +91,9 @@ Result<Bytes> BatchedTokenRequest::serialize() const {
     return writer.take();
 }
 
+// Maximum batch size to prevent memory exhaustion
+constexpr uint64_t MAX_BATCH_SIZE = 10000;
+
 Result<BatchedTokenRequest> BatchedTokenRequest::deserialize(ByteView data) {
     ByteReader reader(data);
 
@@ -99,8 +102,14 @@ Result<BatchedTokenRequest> BatchedTokenRequest::deserialize(ByteView data) {
         return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read request count"});
     }
 
+    // Enforce maximum batch size
+    if (*count > MAX_BATCH_SIZE) {
+        return std::unexpected(Error{ErrorCode::MALFORMED_DATA,
+            "Batch size exceeds maximum: " + std::to_string(*count)});
+    }
+
     BatchedTokenRequest result;
-    result.requests.reserve(*count);
+    result.requests.reserve(static_cast<size_t>(*count));
 
     for (uint64_t i = 0; i < *count; ++i) {
         // Read type to determine size

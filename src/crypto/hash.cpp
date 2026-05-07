@@ -10,6 +10,9 @@
 
 namespace privacy_pass::crypto {
 
+// Maximum input size for OpenSSL APIs (prevent integer truncation)
+constexpr size_t MAX_INPUT_SIZE = static_cast<size_t>(INT_MAX);
+
 Result<Hash256> sha256(ByteView data) {
     Hash256 result;
 
@@ -143,6 +146,11 @@ Result<Hash384> Sha384Hasher::finalize() {
 }
 
 Result<Hash256> hmac_sha256(ByteView key, ByteView data) {
+    // Validate key size to prevent integer truncation
+    if (key.size() > MAX_INPUT_SIZE) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "HMAC key too large"});
+    }
+
     Hash256 result;
     unsigned int len = 0;
 
@@ -155,6 +163,11 @@ Result<Hash256> hmac_sha256(ByteView key, ByteView data) {
 }
 
 Result<Bytes> hkdf_extract_sha256(ByteView salt, ByteView ikm) {
+    // Validate input sizes to prevent integer truncation
+    if (salt.size() > MAX_INPUT_SIZE || ikm.size() > MAX_INPUT_SIZE) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "HKDF input too large"});
+    }
+
     Bytes prk(32);
 
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);
@@ -182,6 +195,11 @@ Result<Bytes> hkdf_extract_sha256(ByteView salt, ByteView ikm) {
 }
 
 Result<Bytes> hkdf_expand_sha256(ByteView prk, ByteView info, size_t length) {
+    // Validate input sizes to prevent integer truncation
+    if (prk.size() > MAX_INPUT_SIZE || info.size() > MAX_INPUT_SIZE) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "HKDF input too large"});
+    }
+
     Bytes okm(length);
 
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);

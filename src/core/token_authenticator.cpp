@@ -9,6 +9,9 @@
 
 namespace privacy_pass {
 
+// Default maximum replay cache size to prevent memory exhaustion
+constexpr size_t DEFAULT_MAX_AUTHENTICATOR_CACHE_SIZE = 100000;
+
 ValidationResult ValidationResult::success(ChallengeDigest digest) {
     return ValidationResult{
         .valid = true,
@@ -81,6 +84,13 @@ struct TokenAuthenticator::Impl {
                     return false;
                 }),
             nonce_entries.end());
+
+        // Enforce maximum size by removing oldest entries if at capacity
+        size_t max_size = config.max_replay_cache_size > 0 ? config.max_replay_cache_size : DEFAULT_MAX_AUTHENTICATOR_CACHE_SIZE;
+        while (redeemed_nonces.size() >= max_size && !nonce_entries.empty()) {
+            redeemed_nonces.erase(nonce_entries.front().nonce);
+            nonce_entries.erase(nonce_entries.begin());
+        }
 
         if (redeemed_nonces.count(nonce) > 0) {
             return false;
@@ -216,8 +226,8 @@ ValidationResult TokenAuthenticator::validate_and_redeem(
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
 
-    // Check for replay first
-    if (!impl_->check_and_add_nonce(token.nonce)) {
+    // Check if this would be a replay (without adding to cache yet)
+    if (impl_->redeemed_nonces.count(token.nonce) > 0) {
         return ValidationResult::failure(
             ErrorCode::TOKEN_REPLAYED,
             "Token has already been redeemed");
@@ -255,6 +265,14 @@ ValidationResult TokenAuthenticator::validate_and_redeem(
         return ValidationResult::failure(
             ErrorCode::TOKEN_INVALID,
             "Signature verification failed");
+    }
+
+    // Only add to replay cache after successful verification
+    if (!impl_->check_and_add_nonce(token.nonce)) {
+        // Race condition: another thread redeemed the same token
+        return ValidationResult::failure(
+            ErrorCode::TOKEN_REPLAYED,
+            "Token has already been redeemed");
     }
 
     return ValidationResult::success(*expected_digest);

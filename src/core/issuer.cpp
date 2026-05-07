@@ -217,10 +217,27 @@ Result<bool> PrivateIssuer::verify(const Token& token) const {
         ByteView(token.authenticator.data(), token.authenticator.size()));
 }
 
+// Hash for TokenKeyId to use in unordered_map
+struct TokenKeyIdHash {
+    size_t operator()(const TokenKeyId& key_id) const {
+        size_t hash = 0;
+        for (size_t i = 0; i < key_id.size(); i += sizeof(size_t)) {
+            size_t chunk = 0;
+            std::memcpy(&chunk, key_id.data() + i, std::min(sizeof(size_t), key_id.size() - i));
+            hash ^= chunk + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+        return hash;
+    }
+};
+
 // MultiKeyIssuer implementation
 struct MultiKeyIssuer::Impl {
-    std::unordered_map<uint8_t, std::unique_ptr<PublicIssuer>> rsa_issuers;
-    std::unordered_map<uint8_t, std::unique_ptr<PrivateIssuer>> voprf_issuers;
+    // Use full key ID for lookup to prevent collisions
+    std::unordered_map<TokenKeyId, std::unique_ptr<PublicIssuer>, TokenKeyIdHash> rsa_issuers;
+    std::unordered_map<TokenKeyId, std::unique_ptr<PrivateIssuer>, TokenKeyIdHash> voprf_issuers;
+    // Also maintain truncated ID lookup for wire protocol compatibility
+    std::unordered_map<uint8_t, std::vector<TokenKeyId>> rsa_keys_by_truncated_id;
+    std::unordered_map<uint8_t, std::vector<TokenKeyId>> voprf_keys_by_truncated_id;
 };
 
 MultiKeyIssuer::MultiKeyIssuer() : impl_(std::make_unique<Impl>()) {}
@@ -230,41 +247,113 @@ MultiKeyIssuer& MultiKeyIssuer::operator=(MultiKeyIssuer&&) noexcept = default;
 
 Result<void> MultiKeyIssuer::add_blind_rsa_key(crypto::BlindRsaPrivateKey key) {
     auto issuer = std::make_unique<PublicIssuer>(std::move(key));
+
+    // Get full key ID
+    auto pub_key = issuer->public_key();
+    if (!pub_key) {
+        return std::unexpected(pub_key.error());
+    }
+    auto key_id = pub_key->key_id();
+    if (!key_id) {
+        return std::unexpected(key_id.error());
+    }
+
     uint8_t truncated_id = issuer->truncated_key_id();
-    impl_->rsa_issuers[truncated_id] = std::move(issuer);
+
+    // Store with full key ID
+    impl_->rsa_issuers[*key_id] = std::move(issuer);
+    impl_->rsa_keys_by_truncated_id[truncated_id].push_back(*key_id);
+
     return {};
 }
 
 Result<void> MultiKeyIssuer::add_voprf_key(crypto::VoprfPrivateKey key) {
     auto issuer = std::make_unique<PrivateIssuer>(std::move(key));
+
+    // Get full key ID
+    auto pub_key = issuer->public_key();
+    if (!pub_key) {
+        return std::unexpected(pub_key.error());
+    }
+    auto key_id = pub_key->key_id();
+    if (!key_id) {
+        return std::unexpected(key_id.error());
+    }
+
     uint8_t truncated_id = issuer->truncated_key_id();
-    impl_->voprf_issuers[truncated_id] = std::move(issuer);
+
+    // Store with full key ID
+    impl_->voprf_issuers[*key_id] = std::move(issuer);
+    impl_->voprf_keys_by_truncated_id[truncated_id].push_back(*key_id);
+
     return {};
 }
 
 void MultiKeyIssuer::remove_key(uint8_t truncated_key_id) {
-    impl_->rsa_issuers.erase(truncated_key_id);
-    impl_->voprf_issuers.erase(truncated_key_id);
+    // Remove all RSA keys with this truncated ID
+    auto rsa_it = impl_->rsa_keys_by_truncated_id.find(truncated_key_id);
+    if (rsa_it != impl_->rsa_keys_by_truncated_id.end()) {
+        for (const auto& key_id : rsa_it->second) {
+            impl_->rsa_issuers.erase(key_id);
+        }
+        impl_->rsa_keys_by_truncated_id.erase(rsa_it);
+    }
+
+    // Remove all VOPRF keys with this truncated ID
+    auto voprf_it = impl_->voprf_keys_by_truncated_id.find(truncated_key_id);
+    if (voprf_it != impl_->voprf_keys_by_truncated_id.end()) {
+        for (const auto& key_id : voprf_it->second) {
+            impl_->voprf_issuers.erase(key_id);
+        }
+        impl_->voprf_keys_by_truncated_id.erase(voprf_it);
+    }
 }
 
 Result<TokenResponse> MultiKeyIssuer::issue(const TokenRequest& request) const {
     switch (request.token_type) {
         case TokenType::BLIND_RSA:
         case TokenType::PARTIALLY_BLIND_RSA: {
-            auto it = impl_->rsa_issuers.find(request.truncated_token_key_id);
-            if (it == impl_->rsa_issuers.end()) {
+            // Find all keys with matching truncated ID
+            auto keys_it = impl_->rsa_keys_by_truncated_id.find(request.truncated_token_key_id);
+            if (keys_it == impl_->rsa_keys_by_truncated_id.end() || keys_it->second.empty()) {
                 return std::unexpected(Error{ErrorCode::ISSUER_UNKNOWN,
                     "Unknown RSA key ID"});
             }
-            return it->second->issue(request);
+
+            // Try each key with the matching truncated ID
+            for (const auto& key_id : keys_it->second) {
+                auto issuer_it = impl_->rsa_issuers.find(key_id);
+                if (issuer_it != impl_->rsa_issuers.end()) {
+                    auto result = issuer_it->second->issue(request);
+                    if (result) {
+                        return result;
+                    }
+                    // If this key didn't work, try the next one
+                }
+            }
+            return std::unexpected(Error{ErrorCode::ISSUER_UNKNOWN,
+                "No matching RSA key found"});
         }
         case TokenType::VOPRF_P384_SHA384: {
-            auto it = impl_->voprf_issuers.find(request.truncated_token_key_id);
-            if (it == impl_->voprf_issuers.end()) {
+            // Find all keys with matching truncated ID
+            auto keys_it = impl_->voprf_keys_by_truncated_id.find(request.truncated_token_key_id);
+            if (keys_it == impl_->voprf_keys_by_truncated_id.end() || keys_it->second.empty()) {
                 return std::unexpected(Error{ErrorCode::ISSUER_UNKNOWN,
                     "Unknown VOPRF key ID"});
             }
-            return it->second->issue(request);
+
+            // Try each key with the matching truncated ID
+            for (const auto& key_id : keys_it->second) {
+                auto issuer_it = impl_->voprf_issuers.find(key_id);
+                if (issuer_it != impl_->voprf_issuers.end()) {
+                    auto result = issuer_it->second->issue(request);
+                    if (result) {
+                        return result;
+                    }
+                }
+            }
+            return std::unexpected(Error{ErrorCode::ISSUER_UNKNOWN,
+                "No matching VOPRF key found"});
         }
         default:
             return std::unexpected(Error{ErrorCode::UNSUPPORTED_TOKEN_TYPE,
@@ -275,31 +364,31 @@ Result<TokenResponse> MultiKeyIssuer::issue(const TokenRequest& request) const {
 std::vector<PublicKey> MultiKeyIssuer::public_keys() const {
     std::vector<PublicKey> keys;
 
-    for (const auto& [id, issuer] : impl_->rsa_issuers) {
+    for (const auto& [key_id, issuer] : impl_->rsa_issuers) {
         auto pub = issuer->public_key();
         if (pub) {
             auto spki = pub->to_spki();
-            auto key_id = pub->key_id();
-            if (spki && key_id) {
+            auto pub_key_id = pub->key_id();
+            if (spki && pub_key_id) {
                 keys.push_back(PublicKey{
                     .type = TokenType::BLIND_RSA,
                     .data = std::move(*spki),
-                    .key_id = *key_id,
+                    .key_id = *pub_key_id,
                 });
             }
         }
     }
 
-    for (const auto& [id, issuer] : impl_->voprf_issuers) {
+    for (const auto& [key_id, issuer] : impl_->voprf_issuers) {
         auto pub = issuer->public_key();
         if (pub) {
             auto bytes = pub->to_bytes();
-            auto key_id = pub->key_id();
-            if (bytes && key_id) {
+            auto pub_key_id = pub->key_id();
+            if (bytes && pub_key_id) {
                 keys.push_back(PublicKey{
                     .type = TokenType::VOPRF_P384_SHA384,
                     .data = std::move(*bytes),
-                    .key_id = *key_id,
+                    .key_id = *pub_key_id,
                 });
             }
         }

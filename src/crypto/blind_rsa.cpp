@@ -6,6 +6,7 @@
 
 #include <openssl/bn.h>
 #include <openssl/core_names.h>
+#include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/param_build.h>
@@ -22,11 +23,22 @@ namespace {
 constexpr int RSA_BITS = 2048;
 constexpr int SALT_LENGTH = 48;  // SHA-384 output size
 
-// Get OpenSSL error string
+// Maximum input size for OpenSSL APIs (prevent integer truncation)
+constexpr size_t MAX_INPUT_SIZE = static_cast<size_t>(INT_MAX);
+
+// Get OpenSSL error string (sanitized for external exposure)
 std::string get_openssl_error() {
     char buf[256];
     ERR_error_string_n(ERR_get_error(), buf, sizeof(buf));
     return buf;
+}
+
+// Get sanitized error string for external callers
+std::string get_sanitized_error() {
+    // Log the detailed error internally
+    spdlog::debug("OpenSSL error: {}", get_openssl_error());
+    // Return generic message to callers
+    return "Cryptographic operation failed";
 }
 
 // EMSA-PSS encoding for blind RSA (RFC 9474)
@@ -127,14 +139,18 @@ BlindRsaPublicKey::BlindRsaPublicKey(BlindRsaPublicKey&&) noexcept = default;
 BlindRsaPublicKey& BlindRsaPublicKey::operator=(BlindRsaPublicKey&&) noexcept = default;
 
 Result<BlindRsaPublicKey> BlindRsaPublicKey::from_spki(ByteView spki) {
+    // Validate input size to prevent integer truncation
+    if (spki.size() > MAX_INPUT_SIZE) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "SPKI data too large"});
+    }
+
     BlindRsaPublicKey key;
 
     const uint8_t* p = spki.data();
     key.impl_->pkey = d2i_PUBKEY(nullptr, &p, static_cast<long>(spki.size()));
 
     if (!key.impl_->pkey) {
-        return std::unexpected(Error{ErrorCode::INVALID_KEY,
-            "Failed to parse SPKI: " + get_openssl_error()});
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, get_sanitized_error()});
     }
 
     if (EVP_PKEY_base_id(key.impl_->pkey) != EVP_PKEY_RSA) {
@@ -145,6 +161,11 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_spki(ByteView spki) {
 }
 
 Result<BlindRsaPublicKey> BlindRsaPublicKey::from_components(ByteView modulus, ByteView exponent) {
+    // Validate input sizes to prevent integer truncation
+    if (modulus.size() > MAX_INPUT_SIZE || exponent.size() > MAX_INPUT_SIZE) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Key component too large"});
+    }
+
     BlindRsaPublicKey key;
 
     BIGNUM* n = BN_bin2bn(modulus.data(), static_cast<int>(modulus.size()), nullptr);
@@ -359,11 +380,16 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
 
 Result<Bytes> BlindRsaPublicKey::finalize(
     ByteView blind_sig,
-    const BlindingData& blinding_data,
-    [[maybe_unused]] ByteView msg) const {
+    BlindingData& blinding_data,
+    ByteView msg) const {
 
     if (!impl_->pkey) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Key not initialized"});
+    }
+
+    // Validate input sizes
+    if (blind_sig.size() > MAX_INPUT_SIZE || blinding_data.inverse.size() > MAX_INPUT_SIZE) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Input too large"});
     }
 
     // Get modulus
@@ -389,7 +415,7 @@ Result<Bytes> BlindRsaPublicKey::finalize(
     if (!z || !r_inv || !sig) {
         BN_free(n_bn);
         BN_free(z);
-        BN_free(r_inv);
+        BN_clear_free(r_inv);
         BN_free(sig);
         BN_CTX_free(bn_ctx);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to allocate bignums"});
@@ -399,7 +425,7 @@ Result<Bytes> BlindRsaPublicKey::finalize(
     if (!BN_mod_mul(sig, z, r_inv, n_bn, bn_ctx)) {
         BN_free(n_bn);
         BN_free(z);
-        BN_free(r_inv);
+        BN_clear_free(r_inv);
         BN_free(sig);
         BN_CTX_free(bn_ctx);
         return std::unexpected(Error{ErrorCode::UNBLINDING_FAILED, "Failed to unblind"});
@@ -410,9 +436,21 @@ Result<Bytes> BlindRsaPublicKey::finalize(
 
     BN_free(n_bn);
     BN_free(z);
-    BN_free(r_inv);
+    BN_clear_free(r_inv);  // Use clear_free for sensitive data
     BN_free(sig);
     BN_CTX_free(bn_ctx);
+
+    // Clear the blinding data after successful use to prevent reuse
+    blinding_data.inverse.clear();
+
+    // Verify the unblinded signature if message was provided
+    if (!msg.empty()) {
+        auto verify_result = verify(msg, ByteView(result.data(), result.size()));
+        if (!verify_result || !*verify_result) {
+            return std::unexpected(Error{ErrorCode::VERIFICATION_FAILED,
+                "Unblinded signature verification failed"});
+        }
+    }
 
     return result;
 }
@@ -488,8 +526,9 @@ Result<std::pair<BlindRsaPrivateKey, BlindRsaPublicKey>> BlindRsaPrivateKey::gen
     EVP_PKEY_CTX_free(ctx);
 
     if (!success || !pkey) {
+        spdlog::debug("Key generation failed: {}", get_openssl_error());
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR,
-            "Key generation failed: " + get_openssl_error()});
+            "Key generation failed"});
     }
 
     BlindRsaPrivateKey private_key;
@@ -504,14 +543,18 @@ Result<std::pair<BlindRsaPrivateKey, BlindRsaPublicKey>> BlindRsaPrivateKey::gen
 }
 
 Result<BlindRsaPrivateKey> BlindRsaPrivateKey::from_pkcs8(ByteView pkcs8) {
+    // Validate input size to prevent integer truncation
+    if (pkcs8.size() > MAX_INPUT_SIZE) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "PKCS#8 data too large"});
+    }
+
     BlindRsaPrivateKey key;
 
     const uint8_t* p = pkcs8.data();
     key.impl_->pkey = d2i_PrivateKey(EVP_PKEY_RSA, nullptr, &p, static_cast<long>(pkcs8.size()));
 
     if (!key.impl_->pkey) {
-        return std::unexpected(Error{ErrorCode::INVALID_KEY,
-            "Failed to parse PKCS#8: " + get_openssl_error()});
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, get_sanitized_error()});
     }
 
     return key;
@@ -557,6 +600,11 @@ Result<BlindRsaPublicKey> BlindRsaPrivateKey::public_key() const {
 Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
     if (!impl_->pkey) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Key not initialized"});
+    }
+
+    // Validate input size to prevent integer truncation
+    if (blinded_msg.size() > MAX_INPUT_SIZE) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Blinded message too large"});
     }
 
     // Get modulus

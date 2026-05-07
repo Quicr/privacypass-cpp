@@ -107,7 +107,7 @@ Result<Token> PublicClient::finalize(
         return std::unexpected(auth_input_bytes.error());
     }
 
-    // Unblind the signature
+    // Unblind the signature (this also verifies and clears blinding_data.inverse)
     auto authenticator = issuer_key.finalize(
         ByteView(rsa_response->blind_sig.data(), rsa_response->blind_sig.size()),
         *blinding_data,
@@ -115,16 +115,6 @@ Result<Token> PublicClient::finalize(
 
     if (!authenticator) {
         return std::unexpected(authenticator.error());
-    }
-
-    // Verify the signature before returning
-    auto verify_result = issuer_key.verify(
-        ByteView(auth_input_bytes->data(), auth_input_bytes->size()),
-        ByteView(authenticator->data(), authenticator->size()));
-
-    if (!verify_result || !*verify_result) {
-        return std::unexpected(Error{ErrorCode::VERIFICATION_FAILED,
-            "Signature verification failed"});
     }
 
     return Token::create(

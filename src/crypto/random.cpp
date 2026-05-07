@@ -6,7 +6,16 @@
 
 namespace privacy_pass::crypto {
 
+// Maximum size for single random generation (prevent integer truncation)
+constexpr size_t MAX_RANDOM_SIZE = static_cast<size_t>(INT_MAX);
+
 Result<Bytes> random_bytes(size_t count) {
+    // Validate size to prevent integer truncation
+    if (count > MAX_RANDOM_SIZE) {
+        return std::unexpected(Error{ErrorCode::RANDOM_GENERATION_FAILED,
+            "Requested random size too large"});
+    }
+
     Bytes result(count);
 
     if (RAND_bytes(result.data(), static_cast<int>(count)) != 1) {
@@ -18,6 +27,12 @@ Result<Bytes> random_bytes(size_t count) {
 }
 
 Result<void> random_fill(MutableByteView buffer) {
+    // Validate size to prevent integer truncation
+    if (buffer.size() > MAX_RANDOM_SIZE) {
+        return std::unexpected(Error{ErrorCode::RANDOM_GENERATION_FAILED,
+            "Buffer size too large"});
+    }
+
     if (RAND_bytes(buffer.data(), static_cast<int>(buffer.size())) != 1) {
         return std::unexpected(Error{ErrorCode::RANDOM_GENERATION_FAILED,
             "Failed to fill buffer with random bytes"});

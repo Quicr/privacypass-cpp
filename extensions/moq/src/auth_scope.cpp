@@ -218,6 +218,40 @@ Result<Bytes> AuthScope::serialize() const {
     return writer.take();
 }
 
+// Validate that an action value is a known Action enum value
+static bool is_valid_action(uint8_t value) {
+    switch (static_cast<Action>(value)) {
+        case Action::CLIENT_SETUP:
+        case Action::SERVER_SETUP:
+        case Action::PUBLISH_NAMESPACE:
+        case Action::SUBSCRIBE_NAMESPACE:
+        case Action::SUBSCRIBE:
+        case Action::REQUEST_UPDATE:
+        case Action::PUBLISH:
+        case Action::FETCH:
+        case Action::TRACK_STATUS:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Validate that a match type value is a known MatchType enum value
+static bool is_valid_match_type(uint8_t value) {
+    switch (static_cast<MatchType>(value)) {
+        case MatchType::MATCH_EXACT:
+        case MatchType::MATCH_PREFIX:
+        case MatchType::MATCH_SUFFIX:
+        case MatchType::MATCH_CONTAINS:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Maximum allowed sizes to prevent memory exhaustion
+constexpr uint16_t MAX_ELEMENT_SIZE = 65535;
+
 Result<AuthScope> AuthScope::deserialize(ByteView data) {
     ByteReader reader(data);
 
@@ -229,11 +263,20 @@ Result<AuthScope> AuthScope::deserialize(ByteView data) {
         return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read actions count"});
     }
 
+    // actions_count is uint8_t so max is 255, no additional check needed
+
     for (uint8_t i = 0; i < *actions_count; ++i) {
         auto action = reader.read_u8();
         if (!action) {
             return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read action"});
         }
+
+        // Validate action is a known value
+        if (!is_valid_action(*action)) {
+            return std::unexpected(Error{ErrorCode::MALFORMED_DATA,
+                "Invalid action value: " + std::to_string(*action)});
+        }
+
         scope.actions.push_back(static_cast<Action>(*action));
     }
 
@@ -246,6 +289,12 @@ Result<AuthScope> AuthScope::deserialize(ByteView data) {
     if (*ns_type == 0xFF) {
         scope.namespace_match = WildcardMatch{};
     } else {
+        // Validate match type
+        if (!is_valid_match_type(*ns_type)) {
+            return std::unexpected(Error{ErrorCode::MALFORMED_DATA,
+                "Invalid namespace match type: " + std::to_string(*ns_type)});
+        }
+
         NamespaceMatchRule rule;
         rule.match_type = static_cast<MatchType>(*ns_type);
 
@@ -254,10 +303,16 @@ Result<AuthScope> AuthScope::deserialize(ByteView data) {
             return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read namespace count"});
         }
 
+        // ns_count is uint8_t so max is 255, no additional check needed
+
         for (uint8_t i = 0; i < *ns_count; ++i) {
             auto elem_len = reader.read_u16();
             if (!elem_len) {
                 return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read element length"});
+            }
+
+            if (*elem_len > MAX_ELEMENT_SIZE) {
+                return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Element too large"});
             }
 
             auto elem_data = reader.read_bytes(*elem_len);
@@ -280,12 +335,22 @@ Result<AuthScope> AuthScope::deserialize(ByteView data) {
     if (*track_type == 0xFF) {
         scope.track_name_match = WildcardMatch{};
     } else {
+        // Validate match type
+        if (!is_valid_match_type(*track_type)) {
+            return std::unexpected(Error{ErrorCode::MALFORMED_DATA,
+                "Invalid track match type: " + std::to_string(*track_type)});
+        }
+
         TrackNameMatchRule rule;
         rule.match_type = static_cast<MatchType>(*track_type);
 
         auto track_len = reader.read_u16();
         if (!track_len) {
             return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read track length"});
+        }
+
+        if (*track_len > MAX_ELEMENT_SIZE) {
+            return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Track pattern too large"});
         }
 
         auto track_data = reader.read_bytes(*track_len);

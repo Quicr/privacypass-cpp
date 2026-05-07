@@ -26,6 +26,9 @@ struct NonceHash {
 
 }  // namespace
 
+// Default maximum replay cache size to prevent memory exhaustion
+constexpr size_t DEFAULT_MAX_REPLAY_CACHE_SIZE = 100000;
+
 // ReplayCache implementation
 struct ReplayCache::Impl {
     struct NonceEntry {
@@ -36,13 +39,17 @@ struct ReplayCache::Impl {
     std::unordered_set<Nonce, NonceHash> nonces;
     std::vector<NonceEntry> entries;
     std::chrono::seconds window;
+    size_t max_size;
     mutable std::mutex mutex;
 
-    explicit Impl(std::chrono::seconds w) : window(w) {}
+    explicit Impl(std::chrono::seconds w, size_t max = DEFAULT_MAX_REPLAY_CACHE_SIZE)
+        : window(w), max_size(max) {
+        entries.reserve(std::min(max_size, size_t(10000)));
+    }
 };
 
-ReplayCache::ReplayCache(std::chrono::seconds window)
-    : impl_(std::make_unique<Impl>(window)) {}
+ReplayCache::ReplayCache(std::chrono::seconds window, size_t max_size)
+    : impl_(std::make_unique<Impl>(window, max_size)) {}
 
 ReplayCache::~ReplayCache() = default;
 ReplayCache::ReplayCache(ReplayCache&&) noexcept = default;
@@ -66,6 +73,12 @@ bool ReplayCache::check_and_add(const Nonce& nonce) {
             }),
         impl_->entries.end());
 
+    // Enforce maximum size by removing oldest entries if at capacity
+    while (impl_->nonces.size() >= impl_->max_size && !impl_->entries.empty()) {
+        impl_->nonces.erase(impl_->entries.front().nonce);
+        impl_->entries.erase(impl_->entries.begin());
+    }
+
     // Check if nonce exists
     if (impl_->nonces.count(nonce) > 0) {
         return false;  // Replay detected
@@ -76,6 +89,11 @@ bool ReplayCache::check_and_add(const Nonce& nonce) {
     impl_->entries.push_back({nonce, now});
 
     return true;  // Not a replay
+}
+
+bool ReplayCache::contains(const Nonce& nonce) const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->nonces.count(nonce) > 0;
 }
 
 void ReplayCache::prune() {
@@ -110,7 +128,7 @@ struct PublicOrigin::Impl {
 
     explicit Impl(OriginConfig cfg)
         : config(std::move(cfg))
-        , replay_cache(config.redemption_window) {}
+        , replay_cache(config.redemption_window, config.max_replay_cache_size) {}
 };
 
 PublicOrigin::PublicOrigin(
@@ -210,14 +228,30 @@ Result<bool> PublicOrigin::verify_and_redeem(
     const Token& token,
     const TokenChallenge& expected_challenge) {
 
-    // Check for replay first
-    if (!impl_->replay_cache.check_and_add(token.nonce)) {
+    // Check if this would be a replay (without adding to cache yet)
+    if (impl_->replay_cache.contains(token.nonce)) {
         return std::unexpected(Error{ErrorCode::TOKEN_REPLAYED,
             "Token has already been redeemed"});
     }
 
-    // Then verify
-    return verify(token, expected_challenge);
+    // Verify the token first
+    auto verify_result = verify(token, expected_challenge);
+    if (!verify_result) {
+        return std::unexpected(verify_result.error());
+    }
+
+    if (!*verify_result) {
+        return false;
+    }
+
+    // Only add to replay cache after successful verification
+    if (!impl_->replay_cache.check_and_add(token.nonce)) {
+        // Race condition: another thread redeemed the same token
+        return std::unexpected(Error{ErrorCode::TOKEN_REPLAYED,
+            "Token has already been redeemed"});
+    }
+
+    return true;
 }
 
 void PublicOrigin::add_issuer_key(crypto::BlindRsaPublicKey key) {
@@ -243,7 +277,7 @@ struct PrivateOrigin::Impl {
 
     explicit Impl(OriginConfig cfg)
         : config(std::move(cfg))
-        , replay_cache(config.redemption_window) {}
+        , replay_cache(config.redemption_window, config.max_replay_cache_size) {}
 };
 
 PrivateOrigin::PrivateOrigin(
@@ -305,11 +339,8 @@ Result<bool> PrivateOrigin::validate_structure(
     return true;
 }
 
-bool PrivateOrigin::would_be_replay([[maybe_unused]] const Token& token) const {
-    // Check without adding
-    // This is a simplified check - real implementation would need
-    // to query the actual cache without modifying it
-    return false;
+bool PrivateOrigin::would_be_replay(const Token& token) const {
+    return impl_->replay_cache.contains(token.nonce);
 }
 
 void PrivateOrigin::mark_redeemed(const Token& token) {
@@ -327,7 +358,7 @@ struct Origin::Impl {
 
     explicit Impl(OriginConfig cfg)
         : config(std::move(cfg))
-        , replay_cache(config.redemption_window) {}
+        , replay_cache(config.redemption_window, config.max_replay_cache_size) {}
 };
 
 Origin::Origin(OriginConfig config)
@@ -427,12 +458,30 @@ Result<bool> Origin::verify_and_redeem(
     const Token& token,
     const TokenChallenge& expected_challenge) {
 
-    if (!impl_->replay_cache.check_and_add(token.nonce)) {
+    // Check if this would be a replay (without adding to cache yet)
+    if (impl_->replay_cache.contains(token.nonce)) {
         return std::unexpected(Error{ErrorCode::TOKEN_REPLAYED,
             "Token has already been redeemed"});
     }
 
-    return verify(token, expected_challenge);
+    // Verify the token first
+    auto verify_result = verify(token, expected_challenge);
+    if (!verify_result) {
+        return std::unexpected(verify_result.error());
+    }
+
+    if (!*verify_result) {
+        return false;
+    }
+
+    // Only add to replay cache after successful verification
+    if (!impl_->replay_cache.check_and_add(token.nonce)) {
+        // Race condition: another thread redeemed the same token
+        return std::unexpected(Error{ErrorCode::TOKEN_REPLAYED,
+            "Token has already been redeemed"});
+    }
+
+    return true;
 }
 
 const OriginConfig& Origin::config() const {

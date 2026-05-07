@@ -86,12 +86,32 @@ Result<Bytes> Token::serialize() const {
     return writer.take();
 }
 
+// Check if a token type value is valid
+static bool is_valid_token_type(uint16_t type) {
+    switch (static_cast<TokenType>(type)) {
+        case TokenType::VOPRF_P384_SHA384:
+        case TokenType::BLIND_RSA:
+        case TokenType::VOPRF_RISTRETTO255_SHA512:
+        case TokenType::PARTIALLY_BLIND_RSA:
+        case TokenType::ARC_P256:
+            return true;
+        default:
+            return false;
+    }
+}
+
 Result<Token> Token::deserialize(ByteView data) {
     ByteReader reader(data);
 
     auto type = reader.read_u16();
     if (!type) {
         return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read token_type"});
+    }
+
+    // Validate token type is a known value
+    if (!is_valid_token_type(*type)) {
+        return std::unexpected(Error{ErrorCode::UNSUPPORTED_TOKEN_TYPE,
+            "Unknown token type: " + std::to_string(*type)});
     }
 
     Token token;
@@ -117,6 +137,11 @@ Result<Token> Token::deserialize(ByteView data) {
 
     // Read authenticator based on token type
     auto info = TokenTypeInfo::for_type(token.token_type);
+    if (info.authenticator_size == 0) {
+        return std::unexpected(Error{ErrorCode::UNSUPPORTED_TOKEN_TYPE,
+            "Token type has no authenticator size defined"});
+    }
+
     if (reader.remaining() < info.authenticator_size) {
         return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Insufficient data for authenticator"});
     }

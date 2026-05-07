@@ -99,50 +99,109 @@ Result<TokenChallenge> TokenChallenge::deserialize(ByteView data) {
         reinterpret_cast<const char*>(issuer_bytes->data()),
         issuer_bytes->size());
 
-    // redemption_context (check remaining data to determine if present)
-    // If there's more data after origin_info length, it has a context
-    size_t remaining = reader.remaining();
-    if (remaining > 2) {
-        // We need to peek at the origin_info length to determine structure
-        // This is a simplified parser - real implementation needs more careful handling
+    // Per RFC 9578: The format is:
+    // struct {
+    //   uint16 token_type;
+    //   opaque issuer_name<1..2^16-1>;
+    //   opaque redemption_context<0..32>;  // 0 or 32 bytes
+    //   opaque origin_info<0..2^16-1>;
+    // }
+    //
+    // redemption_context is either 0 or 32 bytes.
+    // We need to parse based on token type semantics and remaining data.
+    //
+    // Strategy: Calculate expected remaining size with and without context.
+    // If remaining >= 34 (32 context + 2 origin_len), try to read context first.
+    // If remaining == 2 (just origin_len of 0), no context.
 
-        // Try reading as having redemption_context
-        auto context = reader.read_array<32>();
+    size_t remaining = reader.remaining();
+
+    if (remaining < 2) {
+        return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Missing origin_info length"});
+    }
+
+    // Peek at what would be origin_len if there's no redemption_context
+    size_t saved_pos = reader.position();
+
+    // First, try parsing WITHOUT redemption_context
+    auto potential_origin_len = reader.read_u16();
+    if (!potential_origin_len) {
+        return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read potential origin_len"});
+    }
+
+    // Check if remaining data (after this u16) matches the length we just read
+    size_t remaining_after_len = reader.remaining();
+
+    if (remaining_after_len == *potential_origin_len) {
+        // This looks like the correct interpretation: no redemption_context
+        // Read origin_info
+        if (*potential_origin_len > 0) {
+            auto origin_bytes = reader.read_bytes(*potential_origin_len);
+            if (!origin_bytes) {
+                return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read origin_info"});
+            }
+
+            std::string origin_str(
+                reinterpret_cast<const char*>(origin_bytes->data()),
+                origin_bytes->size());
+
+            // Parse comma-separated origins
+            size_t pos = 0;
+            while (pos < origin_str.size()) {
+                size_t comma = origin_str.find(',', pos);
+                if (comma == std::string::npos) {
+                    challenge.origin_info.push_back(origin_str.substr(pos));
+                    break;
+                }
+                challenge.origin_info.push_back(origin_str.substr(pos, comma - pos));
+                pos = comma + 1;
+            }
+        }
+        return challenge;
+    }
+
+    // Reset and try WITH redemption_context
+    // We need to re-read from the saved position
+    // Unfortunately ByteReader doesn't have seek, so we recreate from remaining
+    ByteReader reader2(data.subspan(saved_pos));
+
+    if (reader2.remaining() >= 34) {  // 32 (context) + 2 (origin_len min)
+        auto context = reader2.read_array<32>();
         if (context) {
             challenge.redemption_context = *context;
         }
-    }
 
-    // origin_info
-    auto origin_len = reader.read_u16();
-    if (!origin_len) {
-        return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read origin_info length"});
-    }
-
-    if (*origin_len > 0) {
-        auto origin_bytes = reader.read_bytes(*origin_len);
-        if (!origin_bytes) {
-            return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read origin_info"});
+        auto origin_len = reader2.read_u16();
+        if (!origin_len) {
+            return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read origin_info length"});
         }
 
-        std::string origin_str(
-            reinterpret_cast<const char*>(origin_bytes->data()),
-            origin_bytes->size());
-
-        // Parse comma-separated origins
-        size_t pos = 0;
-        while (pos < origin_str.size()) {
-            size_t comma = origin_str.find(',', pos);
-            if (comma == std::string::npos) {
-                challenge.origin_info.push_back(origin_str.substr(pos));
-                break;
+        if (*origin_len > 0) {
+            auto origin_bytes = reader2.read_bytes(*origin_len);
+            if (!origin_bytes) {
+                return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read origin_info"});
             }
-            challenge.origin_info.push_back(origin_str.substr(pos, comma - pos));
-            pos = comma + 1;
+
+            std::string origin_str(
+                reinterpret_cast<const char*>(origin_bytes->data()),
+                origin_bytes->size());
+
+            // Parse comma-separated origins
+            size_t pos = 0;
+            while (pos < origin_str.size()) {
+                size_t comma = origin_str.find(',', pos);
+                if (comma == std::string::npos) {
+                    challenge.origin_info.push_back(origin_str.substr(pos));
+                    break;
+                }
+                challenge.origin_info.push_back(origin_str.substr(pos, comma - pos));
+                pos = comma + 1;
+            }
         }
+        return challenge;
     }
 
-    return challenge;
+    return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Could not determine redemption_context presence"});
 }
 
 Result<ChallengeDigest> TokenChallenge::digest() const {

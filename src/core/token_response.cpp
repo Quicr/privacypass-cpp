@@ -165,6 +165,9 @@ Result<Bytes> BatchedTokenResponse::serialize() const {
     return writer.take();
 }
 
+// Maximum batch size to prevent memory exhaustion
+constexpr uint64_t MAX_RESPONSE_BATCH_SIZE = 10000;
+
 Result<BatchedTokenResponse> BatchedTokenResponse::deserialize(ByteView data) {
     ByteReader reader(data);
 
@@ -173,8 +176,14 @@ Result<BatchedTokenResponse> BatchedTokenResponse::deserialize(ByteView data) {
         return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read response count"});
     }
 
+    // Enforce maximum batch size
+    if (*count > MAX_RESPONSE_BATCH_SIZE) {
+        return std::unexpected(Error{ErrorCode::MALFORMED_DATA,
+            "Response batch size exceeds maximum: " + std::to_string(*count)});
+    }
+
     BatchedTokenResponse result;
-    result.responses.reserve(*count);
+    result.responses.reserve(static_cast<size_t>(*count));
 
     for (uint64_t i = 0; i < *count; ++i) {
         auto resp = OptionalTokenResponse::deserialize(reader.remaining_data());

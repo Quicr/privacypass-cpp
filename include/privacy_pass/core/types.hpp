@@ -12,6 +12,8 @@
 #include <variant>
 #include <vector>
 
+#include <openssl/crypto.h>
+
 namespace privacy_pass {
 
 // Token type constants (RFC 9578)
@@ -134,10 +136,8 @@ public:
 
     void clear() noexcept {
         if (!data_.empty()) {
-            volatile uint8_t* p = data_.data();
-            for (size_t i = 0; i < data_.size(); ++i) {
-                p[i] = 0;
-            }
+            // Use OPENSSL_cleanse for guaranteed secure memory clearing
+            OPENSSL_cleanse(data_.data(), data_.size());
             data_.clear();
         }
     }

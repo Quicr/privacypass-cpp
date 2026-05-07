@@ -37,6 +37,7 @@ struct TokenAuthenticatorConfig {
     std::chrono::seconds redemption_window{3600};
     std::chrono::seconds replay_window{3600};
     bool require_redemption_context{true};
+    size_t max_replay_cache_size{100000};  // Maximum entries in replay cache (conservative default)
 };
 
 // TokenAuthenticator - entity that validates tokens

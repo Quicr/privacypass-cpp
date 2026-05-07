@@ -21,7 +21,8 @@ namespace privacy_pass {
 class ReplayCache {
 public:
     explicit ReplayCache(
-        std::chrono::seconds window = std::chrono::seconds(3600));
+        std::chrono::seconds window = std::chrono::seconds(3600),
+        size_t max_size = 100000);
     ~ReplayCache();
 
     ReplayCache(const ReplayCache&) = delete;
@@ -32,6 +33,9 @@ public:
     // Check if a nonce has been seen and add it if not
     // Returns true if the nonce is new (not a replay)
     [[nodiscard]] bool check_and_add(const Nonce& nonce);
+
+    // Check if a nonce exists without adding it
+    [[nodiscard]] bool contains(const Nonce& nonce) const;
 
     // Prune expired entries
     void prune();
@@ -50,6 +54,7 @@ struct OriginConfig {
     std::vector<std::string> origin_names;
     std::chrono::seconds redemption_window{3600};
     bool require_redemption_context{true};
+    size_t max_replay_cache_size{100000};  // Maximum entries in replay cache (conservative default)
 };
 
 // Privacy Pass Origin for publicly verifiable tokens (Blind RSA)
