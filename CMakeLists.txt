@@ -13,17 +13,20 @@ option(PRIVACY_PASS_BUILD_MOQ "Build MOQ extension" ON)
 option(PRIVACY_PASS_BUILD_EXAMPLES "Build examples" ON)
 option(PRIVACY_PASS_ENABLE_SANITIZERS "Enable address and undefined sanitizers" OFF)
 
-# Compiler flags
-if(MSVC)
-    add_compile_options(/W4 /WX)
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror)
-endif()
-
+# Sanitizer flags (applied globally since they affect linking)
 if(PRIVACY_PASS_ENABLE_SANITIZERS)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
 endif()
+
+# Helper function to apply strict warning flags to our targets only
+function(privacy_pass_set_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /WX)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+endfunction()
 
 # Dependencies
 find_package(OpenSSL REQUIRED)
@@ -34,7 +37,7 @@ include(FetchContent)
 FetchContent_Declare(
     spdlog
     GIT_REPOSITORY https://github.com/gabime/spdlog.git
-    GIT_TAG v1.12.0
+    GIT_TAG v1.14.1
 )
 FetchContent_MakeAvailable(spdlog)
 
@@ -70,6 +73,7 @@ add_library(privacy_pass_core
     src/core/token.cpp
     src/core/serialization.cpp
 )
+privacy_pass_set_warnings(privacy_pass_core)
 
 target_include_directories(privacy_pass_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -92,6 +96,7 @@ add_library(privacy_pass_crypto
     src/crypto/hash.cpp
     src/crypto/random.cpp
 )
+privacy_pass_set_warnings(privacy_pass_crypto)
 
 target_link_libraries(privacy_pass_crypto PUBLIC
     privacy_pass_core
@@ -103,6 +108,7 @@ add_library(privacy_pass_http
     src/http/auth_scheme.cpp
     src/http/header_parser.cpp
 )
+privacy_pass_set_warnings(privacy_pass_http)
 
 target_link_libraries(privacy_pass_http PUBLIC
     privacy_pass_core
@@ -113,6 +119,7 @@ target_link_libraries(privacy_pass_http PRIVATE spdlog::spdlog)
 add_library(privacy_pass_client
     src/core/client.cpp
 )
+privacy_pass_set_warnings(privacy_pass_client)
 
 target_link_libraries(privacy_pass_client PUBLIC
     privacy_pass_core
@@ -124,6 +131,7 @@ target_link_libraries(privacy_pass_client PRIVATE spdlog::spdlog)
 add_library(privacy_pass_issuer
     src/core/issuer.cpp
 )
+privacy_pass_set_warnings(privacy_pass_issuer)
 
 target_link_libraries(privacy_pass_issuer PUBLIC
     privacy_pass_core
@@ -135,6 +143,7 @@ target_link_libraries(privacy_pass_issuer PRIVATE spdlog::spdlog)
 add_library(privacy_pass_origin
     src/core/origin.cpp
 )
+privacy_pass_set_warnings(privacy_pass_origin)
 
 target_link_libraries(privacy_pass_origin PUBLIC
     privacy_pass_core
@@ -146,6 +155,7 @@ target_link_libraries(privacy_pass_origin PRIVATE spdlog::spdlog)
 add_library(privacy_pass_provider
     src/core/token_provider.cpp
 )
+privacy_pass_set_warnings(privacy_pass_provider)
 
 target_link_libraries(privacy_pass_provider PUBLIC
     privacy_pass_client
@@ -157,6 +167,7 @@ target_link_libraries(privacy_pass_provider PRIVATE spdlog::spdlog)
 add_library(privacy_pass_authenticator
     src/core/token_authenticator.cpp
 )
+privacy_pass_set_warnings(privacy_pass_authenticator)
 
 target_link_libraries(privacy_pass_authenticator PUBLIC
     privacy_pass_origin
@@ -192,6 +203,7 @@ if(PRIVACY_PASS_BUILD_MOQ)
         privacy_pass_core
     )
     target_link_libraries(privacy_pass_moq PRIVATE spdlog::spdlog)
+    privacy_pass_set_warnings(privacy_pass_moq)
 endif()
 
 # Tests
@@ -219,6 +231,7 @@ if(PRIVACY_PASS_BUILD_TESTS)
     endif()
 
     add_executable(privacy_pass_tests ${TEST_SOURCES})
+    privacy_pass_set_warnings(privacy_pass_tests)
 
     target_link_libraries(privacy_pass_tests PRIVATE
         privacy_pass
@@ -239,6 +252,7 @@ if(PRIVACY_PASS_BUILD_BENCHMARKS)
         benchmarks/bench_token_issuance.cpp
         benchmarks/bench_serialization.cpp
     )
+    privacy_pass_set_warnings(privacy_pass_benchmarks)
 
     target_link_libraries(privacy_pass_benchmarks PRIVATE
         privacy_pass
@@ -250,16 +264,20 @@ endif()
 if(PRIVACY_PASS_BUILD_EXAMPLES)
     add_executable(example_basic_flow examples/basic_flow.cpp)
     target_link_libraries(example_basic_flow PRIVATE privacy_pass)
+    privacy_pass_set_warnings(example_basic_flow)
 
     if(PRIVACY_PASS_BUILD_MOQ)
         add_executable(example_moq_client examples/moq_client.cpp)
         target_link_libraries(example_moq_client PRIVATE privacy_pass privacy_pass_moq)
+        privacy_pass_set_warnings(example_moq_client)
 
         add_executable(example_moq_relay examples/moq_relay.cpp)
         target_link_libraries(example_moq_relay PRIVATE privacy_pass privacy_pass_moq)
+        privacy_pass_set_warnings(example_moq_relay)
 
         add_executable(example_moq_blind_rsa_auth examples/moq_blind_rsa_auth.cpp)
         target_link_libraries(example_moq_blind_rsa_auth PRIVATE privacy_pass privacy_pass_moq)
+        privacy_pass_set_warnings(example_moq_blind_rsa_auth)
     endif()
 endif()
 
