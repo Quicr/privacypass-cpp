@@ -1,6 +1,14 @@
 # privacypass-cpp
 
 [![CI](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-BSD_2--Clause-blue.svg)](LICENSE)
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-blue.svg)](https://en.cppreference.com/w/cpp/23)
+
+| Platform | Status |
+|----------|--------|
+| Linux | [![Linux](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml?query=branch%3Amain) |
+| macOS | [![macOS](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml?query=branch%3Amain) |
+| Windows | [![Windows](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml?query=branch%3Amain) |
 
 C++ implementation of the Privacy Pass protocol (RFC 9576-9578) with optional MOQ extension support.
 
