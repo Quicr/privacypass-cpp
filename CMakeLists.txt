@@ -14,7 +14,11 @@ option(PRIVACY_PASS_BUILD_EXAMPLES "Build examples" ON)
 option(PRIVACY_PASS_ENABLE_SANITIZERS "Enable address and undefined sanitizers" OFF)
 
 # Compiler flags
-add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+if(MSVC)
+    add_compile_options(/W4 /WX)
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+endif()
 
 if(PRIVACY_PASS_ENABLE_SANITIZERS)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
