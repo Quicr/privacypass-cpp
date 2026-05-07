@@ -257,6 +257,9 @@ if(PRIVACY_PASS_BUILD_EXAMPLES)
 
         add_executable(example_moq_relay examples/moq_relay.cpp)
         target_link_libraries(example_moq_relay PRIVATE privacy_pass privacy_pass_moq)
+
+        add_executable(example_moq_blind_rsa_auth examples/moq_blind_rsa_auth.cpp)
+        target_link_libraries(example_moq_blind_rsa_auth PRIVATE privacy_pass privacy_pass_moq)
     endif()
 endif()
 
