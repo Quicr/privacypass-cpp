@@ -33,6 +33,14 @@ find_package(OpenSSL REQUIRED)
 
 include(FetchContent)
 
+# Silence MSVC deprecation warnings for spdlog's bundled fmt library
+if(MSVC)
+    add_compile_definitions(_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING)
+endif()
+
+# Disable spdlog's own warnings-as-errors to avoid issues with third-party code
+set(SPDLOG_ENABLE_WARNINGS OFF CACHE BOOL "" FORCE)
+
 # Fetch spdlog
 FetchContent_Declare(
     spdlog
