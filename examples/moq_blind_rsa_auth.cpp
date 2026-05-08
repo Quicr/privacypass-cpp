@@ -44,7 +44,7 @@ int main() {
     std::cout << "║  (draft-ietf-moq-privacy-pass-auth Section 2.2.1)            ║\n";
     std::cout << "╚══════════════════════════════════════════════════════════════╝\n\n";
 
-    initialize();
+    (void)initialize();
 
     // ══════════════════════════════════════════════════════════════════════
     // SETUP: ISSUER AND RELAY CONFIGURATION (Pre-deployment)

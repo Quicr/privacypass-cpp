@@ -8,7 +8,7 @@
 // Global setup for tests
 struct GlobalSetup {
     GlobalSetup() {
-        privacy_pass::initialize();
+        (void)privacy_pass::initialize();
     }
     ~GlobalSetup() {
         privacy_pass::shutdown();
