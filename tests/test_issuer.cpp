@@ -207,7 +207,7 @@ TEST_SUITE("MultiKeyIssuer") {
         REQUIRE(key_id.has_value());
         uint8_t truncated = (*key_id)[31];
 
-        issuer.add_blind_rsa_key(std::move(keypair->first));
+        (void)issuer.add_blind_rsa_key(std::move(keypair->first));
 
         // Remove the key
         issuer.remove_key(truncated);
@@ -226,7 +226,7 @@ TEST_SUITE("MultiKeyIssuer") {
 
         auto keypair = BlindRsaPrivateKey::generate();
         REQUIRE(keypair.has_value());
-        issuer.add_blind_rsa_key(std::move(keypair->first));
+        (void)issuer.add_blind_rsa_key(std::move(keypair->first));
 
         auto config = issuer.config("https://issuer.example.com/token-request");
 

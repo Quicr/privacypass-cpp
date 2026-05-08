@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 Cisco Systems
 // SPDX-License-Identifier: BSD-2-Clause
 #include <doctest/doctest.h>
+#include <ostream>
 #include <privacy_pass/core/types.hpp>
 
 using namespace privacy_pass;

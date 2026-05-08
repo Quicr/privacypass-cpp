@@ -4,7 +4,7 @@
 #include <privacy_pass/privacy_pass.hpp>
 
 int main(int argc, char** argv) {
-    privacy_pass::initialize();
+    (void)privacy_pass::initialize();
 
     benchmark::Initialize(&argc, argv);
     benchmark::RunSpecifiedBenchmarks();
