@@ -195,27 +195,47 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_components(ByteView modulus, B
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Failed to create bignums"});
     }
 
-    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA_PSS, nullptr);
-    if (!ctx) {
+    OSSL_PARAM_BLD* bld = OSSL_PARAM_BLD_new();
+    if (!bld) {
         BN_free(n);
         BN_free(e);
-        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create context"});
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create parameter builder"});
     }
 
-    OSSL_PARAM_BLD* bld = OSSL_PARAM_BLD_new();
-    OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_N, n);
-    OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_E, e);
-    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_RSA_DIGEST,
-        const_cast<char*>("SHA384"), 0);
-    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_RSA_MASKGENFUNC,
-        const_cast<char*>("MGF1"), 0);
-    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_RSA_MGF1_DIGEST,
-        const_cast<char*>("SHA384"), 0);
-    OSSL_PARAM_BLD_push_int(bld, OSSL_PKEY_PARAM_RSA_PSS_SALTLEN, SALT_LENGTH);
+    const bool params_pushed =
+        OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_N, n) == 1 &&
+        OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_E, e) == 1 &&
+        OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_RSA_DIGEST,
+            const_cast<char*>("SHA384"), 0) == 1 &&
+        OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_RSA_MASKGENFUNC,
+            const_cast<char*>("MGF1"), 0) == 1 &&
+        OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_RSA_MGF1_DIGEST,
+            const_cast<char*>("SHA384"), 0) == 1 &&
+        OSSL_PARAM_BLD_push_int(bld, OSSL_PKEY_PARAM_RSA_PSS_SALTLEN, SALT_LENGTH) == 1;
+    if (!params_pushed) {
+        OSSL_PARAM_BLD_free(bld);
+        BN_free(n);
+        BN_free(e);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to build RSA parameters"});
+    }
+
     OSSL_PARAM* params = OSSL_PARAM_BLD_to_param(bld);
+    if (!params) {
+        OSSL_PARAM_BLD_free(bld);
+        BN_free(n);
+        BN_free(e);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create RSA parameters"});
+    }
 
     EVP_PKEY* pkey = nullptr;
     EVP_PKEY_CTX* from_data_ctx = EVP_PKEY_CTX_new_from_name(nullptr, "RSA-PSS", nullptr);
+    if (!from_data_ctx) {
+        OSSL_PARAM_free(params);
+        OSSL_PARAM_BLD_free(bld);
+        BN_free(n);
+        BN_free(e);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create RSA-PSS context"});
+    }
 
     bool success = EVP_PKEY_fromdata_init(from_data_ctx) == 1 &&
                    EVP_PKEY_fromdata(from_data_ctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) == 1;
@@ -223,7 +243,6 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_components(ByteView modulus, B
     OSSL_PARAM_free(params);
     OSSL_PARAM_BLD_free(bld);
     EVP_PKEY_CTX_free(from_data_ctx);
-    EVP_PKEY_CTX_free(ctx);
     BN_free(n);
     BN_free(e);
 
