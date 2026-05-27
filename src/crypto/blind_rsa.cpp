@@ -353,19 +353,17 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
     // Generate random blinding factor r
     BIGNUM* r = BN_new();
     BIGNUM* r_inv = BN_new();
-    BIGNUM* r_inv_mont = BN_new();
     BIGNUM* x = BN_new();
     BIGNUM* x_mont = BN_new();
     BIGNUM* blinded = BN_new();
     BN_MONT_CTX* mont = BN_MONT_CTX_new();
 
-    if (!r || !r_inv || !r_inv_mont || !x || !x_mont || !blinded || !mont) {
+    if (!r || !r_inv || !x || !x_mont || !blinded || !mont) {
         BN_free(n_bn);
         BN_free(m);
         BN_free(e_bn);
         BN_clear_free(r);
         BN_clear_free(r_inv);
-        BN_clear_free(r_inv_mont);
         BN_free(x);
         BN_free(x_mont);
         BN_free(blinded);
@@ -380,7 +378,6 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
         BN_free(e_bn);
         BN_clear_free(r);
         BN_clear_free(r_inv);
-        BN_clear_free(r_inv_mont);
         BN_free(x);
         BN_free(x_mont);
         BN_free(blinded);
@@ -397,7 +394,6 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
             BN_free(e_bn);
             BN_clear_free(r);
             BN_clear_free(r_inv);
-            BN_clear_free(r_inv_mont);
             BN_free(x);
             BN_free(x_mont);
             BN_free(blinded);
@@ -407,21 +403,6 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
         }
     } while (BN_is_zero(r) || !BN_mod_inverse(r_inv, r, n_bn, bn_ctx));
 
-    if (BN_to_montgomery(r_inv_mont, r_inv, mont, bn_ctx) != 1) {
-        BN_free(n_bn);
-        BN_free(m);
-        BN_free(e_bn);
-        BN_clear_free(r);
-        BN_clear_free(r_inv);
-        BN_clear_free(r_inv_mont);
-        BN_free(x);
-        BN_free(x_mont);
-        BN_free(blinded);
-        BN_MONT_CTX_free(mont);
-        BN_CTX_free(bn_ctx);
-        return std::unexpected(Error{ErrorCode::BLINDING_FAILED, "Failed to convert inverse"});
-    }
-
     // x = r^e mod n
     if (BN_mod_exp_mont(x, r, e_bn, n_bn, bn_ctx, mont) != 1 ||
         BN_to_montgomery(x_mont, x, mont, bn_ctx) != 1) {
@@ -430,7 +411,6 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
         BN_free(e_bn);
         BN_clear_free(r);
         BN_clear_free(r_inv);
-        BN_clear_free(r_inv_mont);
         BN_free(x);
         BN_free(x_mont);
         BN_free(blinded);
@@ -446,7 +426,6 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
         BN_free(e_bn);
         BN_clear_free(r);
         BN_clear_free(r_inv);
-        BN_clear_free(r_inv_mont);
         BN_free(x);
         BN_free(x_mont);
         BN_free(blinded);
@@ -457,9 +436,9 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
 
     BlindingData result;
 
-    // Store inverse in Montgomery form for constant-shape unblinding.
+    // Store inverse in standard form for portable serialization.
     result.inverse.resize(static_cast<size_t>(mod_size));
-    BN_bn2binpad(r_inv_mont, result.inverse.data(), mod_size);
+    BN_bn2binpad(r_inv, result.inverse.data(), mod_size);
 
     // Store blinded message
     result.blinded_msg.resize(static_cast<size_t>(mod_size));
@@ -473,7 +452,6 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
     BN_free(e_bn);
     BN_clear_free(r);
     BN_clear_free(r_inv);
-    BN_clear_free(r_inv_mont);
     BN_free(x);
     BN_free(x_mont);
     BN_free(blinded);
@@ -515,13 +493,15 @@ Result<Bytes> BlindRsaPublicKey::finalize(
     BIGNUM* z = BN_bin2bn(blind_sig.data(), static_cast<int>(blind_sig.size()), nullptr);
     BIGNUM* r_inv = BN_bin2bn(blinding_data.inverse.data(),
         static_cast<int>(blinding_data.inverse.size()), nullptr);
+    BIGNUM* r_inv_mont = BN_new();
     BIGNUM* sig = BN_new();
     BN_MONT_CTX* mont = BN_MONT_CTX_new();
 
-    if (!z || !r_inv || !sig || !mont) {
+    if (!z || !r_inv || !r_inv_mont || !sig || !mont) {
         BN_free(n_bn);
         BN_free(z);
         BN_clear_free(r_inv);
+        BN_clear_free(r_inv_mont);
         BN_free(sig);
         BN_MONT_CTX_free(mont);
         BN_CTX_free(bn_ctx);
@@ -532,17 +512,31 @@ Result<Bytes> BlindRsaPublicKey::finalize(
         BN_free(n_bn);
         BN_free(z);
         BN_clear_free(r_inv);
+        BN_clear_free(r_inv_mont);
         BN_free(sig);
         BN_MONT_CTX_free(mont);
         BN_CTX_free(bn_ctx);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create Montgomery context"});
     }
 
-    // sig = z * r_inv mod n
-    if (BN_mod_mul_montgomery(sig, z, r_inv, mont, bn_ctx) != 1) {
+    // Convert standard-form inverse to Montgomery form for constant-shape multiply
+    if (BN_to_montgomery(r_inv_mont, r_inv, mont, bn_ctx) != 1) {
         BN_free(n_bn);
         BN_free(z);
         BN_clear_free(r_inv);
+        BN_clear_free(r_inv_mont);
+        BN_free(sig);
+        BN_MONT_CTX_free(mont);
+        BN_CTX_free(bn_ctx);
+        return std::unexpected(Error{ErrorCode::UNBLINDING_FAILED, "Failed to convert inverse to Montgomery form"});
+    }
+
+    // sig = z * r_inv mod n
+    if (BN_mod_mul_montgomery(sig, z, r_inv_mont, mont, bn_ctx) != 1) {
+        BN_free(n_bn);
+        BN_free(z);
+        BN_clear_free(r_inv);
+        BN_clear_free(r_inv_mont);
         BN_free(sig);
         BN_MONT_CTX_free(mont);
         BN_CTX_free(bn_ctx);
@@ -554,7 +548,8 @@ Result<Bytes> BlindRsaPublicKey::finalize(
 
     BN_free(n_bn);
     BN_free(z);
-    BN_clear_free(r_inv);  // Use clear_free for sensitive data
+    BN_clear_free(r_inv);
+    BN_clear_free(r_inv_mont);
     BN_free(sig);
     BN_MONT_CTX_free(mont);
     BN_CTX_free(bn_ctx);
