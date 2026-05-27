@@ -9,7 +9,7 @@
 namespace privacy_pass::crypto {
 
 // Blind RSA implementation (RFC 9474)
-// Privacy Pass uses RSA-2048 with RSASSA-PSS and SHA-384.
+// Uses RSA-2048 with RSASSA-PSS and SHA-384
 
 // RSA key size constants
 constexpr size_t RSA_MODULUS_SIZE = 256;   // 2048 bits = 256 bytes
