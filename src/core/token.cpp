@@ -152,6 +152,10 @@ Result<Token> Token::deserialize(ByteView data) {
     }
     token.authenticator.assign(auth->begin(), auth->end());
 
+    if (!reader.empty()) {
+        return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Trailing Token data"});
+    }
+
     return token;
 }
 

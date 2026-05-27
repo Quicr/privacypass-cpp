@@ -45,6 +45,17 @@ size_t TokenChallenge::serialized_size() const noexcept {
 }
 
 Result<Bytes> TokenChallenge::serialize() const {
+    if (issuer_name.empty() || issuer_name.size() > 0xFFFF) {
+        return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
+            "issuer_name length must be 1..65535"});
+    }
+
+    std::string origin_str = origin_info_string();
+    if (origin_str.size() > 0xFFFF) {
+        return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
+            "origin_info length must be <= 65535"});
+    }
+
     ByteWriter writer(serialized_size());
 
     // token_type (2 bytes)
@@ -65,7 +76,6 @@ Result<Bytes> TokenChallenge::serialize() const {
     }
 
     // origin_info (length-prefixed, 2 bytes)
-    std::string origin_str = origin_info_string();
     writer.write_u16(static_cast<uint16_t>(origin_str.size()));
     if (!origin_str.empty()) {
         writer.write_bytes(ByteView(

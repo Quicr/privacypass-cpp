@@ -131,6 +131,10 @@ Result<OptionalTokenResponse> OptionalTokenResponse::deserialize(ByteView data) 
     OptionalTokenResponse result;
     result.present = (*status == 0x01);
 
+    if (*status != 0x00 && *status != 0x01) {
+        return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Invalid response status"});
+    }
+
     if (result.present) {
         auto type = reader.read_u16();
         if (!type) {
@@ -144,6 +148,8 @@ Result<OptionalTokenResponse> OptionalTokenResponse::deserialize(ByteView data) 
             return std::unexpected(resp.error());
         }
         result.response = std::move(*resp);
+    } else if (!reader.empty()) {
+        return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Trailing absent response data"});
     }
 
     return result;
@@ -153,7 +159,17 @@ Result<OptionalTokenResponse> OptionalTokenResponse::deserialize(ByteView data) 
 Result<Bytes> BatchedTokenResponse::serialize() const {
     ByteWriter writer;
 
-    writer.write_varint(responses.size());
+    size_t payload_size = 0;
+    for (const auto& resp : responses) {
+        auto serialized = resp.serialize();
+        if (!serialized) {
+            return std::unexpected(serialized.error());
+        }
+        payload_size += serialized->size();
+    }
+
+    writer.write_varint(payload_size);
+
     for (const auto& resp : responses) {
         auto serialized = resp.serialize();
         if (!serialized) {
@@ -166,37 +182,69 @@ Result<Bytes> BatchedTokenResponse::serialize() const {
 }
 
 // Maximum batch size to prevent memory exhaustion
-constexpr uint64_t MAX_RESPONSE_BATCH_SIZE = 10000;
+constexpr size_t MAX_RESPONSE_BATCH_SIZE = 10000;
+constexpr uint64_t MAX_RESPONSE_BATCH_PAYLOAD_SIZE = 65535;
 
 Result<BatchedTokenResponse> BatchedTokenResponse::deserialize(ByteView data) {
     ByteReader reader(data);
 
-    auto count = reader.read_varint();
-    if (!count) {
-        return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read response count"});
+    auto payload_size_value = reader.read_varint();
+    if (!payload_size_value) {
+        return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read response batch size"});
+    }
+    if (*payload_size_value > MAX_RESPONSE_BATCH_PAYLOAD_SIZE) {
+        return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Response batch payload too large"});
     }
 
-    // Enforce maximum batch size
-    if (*count > MAX_RESPONSE_BATCH_SIZE) {
-        return std::unexpected(Error{ErrorCode::MALFORMED_DATA,
-            "Response batch size exceeds maximum: " + std::to_string(*count)});
+    auto payload = reader.read_bytes(static_cast<size_t>(*payload_size_value));
+    if (!payload) {
+        return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read response batch payload"});
     }
+    if (!reader.empty()) {
+        return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Trailing BatchedTokenResponse data"});
+    }
+
+    ByteReader payload_reader(*payload);
 
     BatchedTokenResponse result;
-    result.responses.reserve(static_cast<size_t>(*count));
 
-    for (uint64_t i = 0; i < *count; ++i) {
-        auto resp = OptionalTokenResponse::deserialize(reader.remaining_data());
+    while (!payload_reader.empty()) {
+        if (result.responses.size() >= MAX_RESPONSE_BATCH_SIZE) {
+            return std::unexpected(Error{ErrorCode::MALFORMED_DATA,
+                "Response batch size exceeds maximum"});
+        }
+
+        auto remaining = payload_reader.remaining_data();
+        if (remaining.empty()) {
+            return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read response status"});
+        }
+
+        size_t response_size = 1;
+        if (remaining[0] == 0x01) {
+            if (remaining.size() < 3) {
+                return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read response type"});
+            }
+            const auto type = static_cast<TokenType>(
+                (static_cast<uint16_t>(remaining[1]) << 8) | remaining[2]);
+            const auto info = TokenTypeInfo::for_type(type);
+            if (info.authenticator_size == 0) {
+                return std::unexpected(Error{ErrorCode::UNSUPPORTED_TOKEN_TYPE,
+                    "Unsupported batched response token type"});
+            }
+            response_size += 2 + (type == TokenType::VOPRF_P384_SHA384 ? 145 : info.authenticator_size);
+        } else if (remaining[0] != 0x00) {
+            return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Invalid response status"});
+        }
+
+        auto response_bytes = payload_reader.read_bytes(response_size);
+        if (!response_bytes) {
+            return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read response"});
+        }
+
+        auto resp = OptionalTokenResponse::deserialize(*response_bytes);
         if (!resp) {
             return std::unexpected(resp.error());
         }
-
-        // Calculate how much to skip (simplified - real implementation needs proper length handling)
-        size_t skip = 1;  // status byte
-        if (resp->present && resp->response) {
-            skip += 2 + resp->response->serialized_size();
-        }
-        reader.skip(skip);
 
         result.responses.push_back(std::move(*resp));
     }

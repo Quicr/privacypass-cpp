@@ -166,4 +166,28 @@ TEST_SUITE("BatchedTokenRequest") {
         REQUIRE(serialized.has_value());
         CHECK(serialized->size() == batch.serialized_size());
     }
+
+    TEST_CASE("generic batched token vectors deserialize and serialize") {
+        const std::array files{
+            "generic_batched_tokens_v6_go.json",
+            "generic_batched_tokens_v6_rs.json",
+        };
+
+        for (const auto* file : files) {
+            const auto vectors = test_vectors::load_json(file);
+            for (const auto& vector : vectors) {
+                CAPTURE(file);
+                CAPTURE(vector.dump());
+
+                const auto request_bytes = test_vectors::hex_field(vector, "token_request");
+                auto request = BatchedTokenRequest::deserialize(test_vectors::view(request_bytes));
+                REQUIRE(request.has_value());
+                CHECK(request->requests.size() == vector.at("issuance").size());
+
+                auto serialized = request->serialize();
+                REQUIRE(serialized.has_value());
+                CHECK(*serialized == request_bytes);
+            }
+        }
+    }
 }

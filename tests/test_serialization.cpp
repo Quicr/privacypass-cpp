@@ -257,4 +257,28 @@ TEST_SUITE("TokenResponse") {
             }
         }
     }
+
+    TEST_CASE("generic batched token response vectors deserialize and serialize") {
+        const std::array files{
+            "generic_batched_tokens_v6_go.json",
+            "generic_batched_tokens_v6_rs.json",
+        };
+
+        for (const auto* file : files) {
+            const auto vectors = test_vectors::load_json(file);
+            for (const auto& vector : vectors) {
+                CAPTURE(file);
+                CAPTURE(vector.dump());
+
+                const auto response_bytes = test_vectors::hex_field(vector, "token_response");
+                auto response = BatchedTokenResponse::deserialize(test_vectors::view(response_bytes));
+                REQUIRE(response.has_value());
+                CHECK(response->responses.size() == vector.at("issuance").size());
+
+                auto serialized = response->serialize();
+                REQUIRE(serialized.has_value());
+                CHECK(*serialized == response_bytes);
+            }
+        }
+    }
 }
