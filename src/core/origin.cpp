@@ -442,11 +442,8 @@ Result<bool> Origin::verify(
                 "No RSA keys configured"});
 
         case TokenType::VOPRF_P384_SHA384:
-            if (impl_->private_origin) {
-                return impl_->private_origin->validate_structure(token, expected_challenge);
-            }
-            return std::unexpected(Error{ErrorCode::ISSUER_UNKNOWN,
-                "No VOPRF keys configured"});
+            return std::unexpected(Error{ErrorCode::UNSUPPORTED_TOKEN_TYPE,
+                "VOPRF tokens require issuer private-key verification"});
 
         default:
             return std::unexpected(Error{ErrorCode::UNSUPPORTED_TOKEN_TYPE,
