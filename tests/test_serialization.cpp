@@ -240,6 +240,17 @@ TEST_SUITE("TokenResponse") {
                 auto response = TokenResponse::deserialize(type, test_vectors::view(response_bytes));
                 REQUIRE(response.has_value());
 
+                if (type == TokenType::BLIND_RSA) {
+                    const auto* blind_rsa = response->as_blind_rsa();
+                    REQUIRE(blind_rsa != nullptr);
+                    CHECK(blind_rsa->blind_sig == response_bytes);
+                } else if (type == TokenType::VOPRF_P384_SHA384) {
+                    const auto* voprf = response->as_voprf();
+                    REQUIRE(voprf != nullptr);
+                    CHECK(voprf->evaluate_msg == Bytes(response_bytes.begin(), response_bytes.begin() + 49));
+                    CHECK(voprf->evaluate_proof == Bytes(response_bytes.begin() + 49, response_bytes.end()));
+                }
+
                 auto serialized = response->serialize();
                 REQUIRE(serialized.has_value());
                 CHECK(*serialized == response_bytes);
