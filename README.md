@@ -10,13 +10,13 @@
 | macOS | [![macOS](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml?query=branch%3Amain) |
 | Windows | [![Windows](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Quicr/privacypass-cpp/actions/workflows/ci.yml?query=branch%3Amain) |
 
-C++ implementation of the Privacy Pass protocol (RFC 9576-9578) with optional MOQ extension support.
+C++ implementation of the Privacy Pass protocol ([RFC9576](https://datatracker.ietf.org/doc/html/rfc9576), [RFC9577](https://datatracker.ietf.org/doc/html/rfc9577), [RFC9578](https://datatracker.ietf.org/doc/html/rfc9578)) with optional MOQ extension ([draft-ietf-moq-privacy-pass-auth-02](https://datatracker.ietf.org/doc/html/draft-ietf-moq-privacy-pass-auth-02)) support.
 
 ## Features
 
 - Blind RSA (Token Type 0x0002) and VOPRF P-384 (Token Type 0x0001)
 - Token challenges, requests, responses, and redemption
-- Optional MOQ extension (draft-ietf-moq-privacy-pass-auth)
+- Optional MOQ extension ([draft-ietf-moq-privacy-pass-auth-02](https://datatracker.ietf.org/doc/html/draft-ietf-moq-privacy-pass-auth-02))
 - Modern C++23 with `std::expected` error handling
 
 ## Building
