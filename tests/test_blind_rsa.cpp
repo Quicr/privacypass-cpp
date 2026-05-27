@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 #include <doctest/doctest.h>
 #include <privacy_pass/crypto/blind_rsa.hpp>
+#include <privacy_pass/core/token.hpp>
+
+#include "test_vector_utils.hpp"
 
 using namespace privacy_pass;
 using namespace privacy_pass::crypto;
@@ -148,6 +151,41 @@ TEST_SUITE("Blind RSA") {
         SUBCASE("Empty PKCS#8") {
             auto result = BlindRsaPrivateKey::from_pkcs8(ByteView{});
             CHECK(!result.has_value());
+        }
+    }
+
+    TEST_CASE("RFC 9578 public-verifiable token vectors verify") {
+        const std::array files{
+            "pub_verif_rfc9578.go.json",
+            "pub_verif_rfc9578.rust.json",
+        };
+
+        for (const auto* file : files) {
+            const auto vectors = test_vectors::load_json(file);
+            for (const auto& vector : vectors) {
+                CAPTURE(file);
+                CAPTURE(vector.dump());
+
+                auto public_key = BlindRsaPublicKey::from_spki(
+                    test_vectors::view(test_vectors::hex_field(vector, "pkS")));
+                REQUIRE(public_key.has_value());
+
+                const auto token_bytes = test_vectors::hex_field(vector, "token");
+                auto token = Token::deserialize(test_vectors::view(token_bytes));
+                REQUIRE(token.has_value());
+
+                auto key_id = public_key->key_id();
+                REQUIRE(key_id.has_value());
+                CHECK(*key_id == token->token_key_id);
+
+                auto input = token->authenticator_input().serialize();
+                REQUIRE(input.has_value());
+                auto valid = public_key->verify(
+                    test_vectors::view(*input),
+                    test_vectors::view(token->authenticator));
+                REQUIRE(valid.has_value());
+                CHECK(*valid);
+            }
         }
     }
 }
