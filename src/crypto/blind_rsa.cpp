@@ -250,6 +250,12 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_components(ByteView modulus, B
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Failed to create RSASSA-PSS key"});
     }
 
+    auto validated = validate_rsa_pss_params(pkey);
+    if (!validated) {
+        EVP_PKEY_free(pkey);
+        return std::unexpected(validated.error());
+    }
+
     key.impl_->pkey = pkey;
     return key;
 }
