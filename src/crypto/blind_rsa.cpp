@@ -41,6 +41,11 @@ std::string get_sanitized_error() {
     return "Cryptographic operation failed";
 }
 
+bool is_rsa_key(const EVP_PKEY* key) {
+    const int type = EVP_PKEY_base_id(key);
+    return type == EVP_PKEY_RSA || type == EVP_PKEY_RSA_PSS;
+}
+
 // EMSA-PSS encoding for blind RSA (RFC 9474)
 Result<Bytes> emsa_pss_encode(ByteView msg, size_t emLen) {
     // Hash the message with SHA-384
@@ -123,6 +128,7 @@ Result<Bytes> emsa_pss_encode(ByteView msg, size_t emLen) {
 // BlindRsaPublicKey implementation
 struct BlindRsaPublicKey::Impl {
     EVP_PKEY* pkey = nullptr;
+    Bytes original_spki;
     TokenKeyId cached_key_id{};
     bool key_id_computed = false;
 
@@ -153,9 +159,11 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_spki(ByteView spki) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, get_sanitized_error()});
     }
 
-    if (EVP_PKEY_base_id(key.impl_->pkey) != EVP_PKEY_RSA) {
+    if (!is_rsa_key(key.impl_->pkey)) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSA key"});
     }
+
+    key.impl_->original_spki.assign(spki.begin(), spki.end());
 
     return key;
 }
@@ -234,12 +242,18 @@ Result<TokenKeyId> BlindRsaPublicKey::key_id() const {
         return impl_->cached_key_id;
     }
 
-    auto spki = to_spki();
-    if (!spki) {
-        return std::unexpected(spki.error());
+    Bytes spki;
+    if (!impl_->original_spki.empty()) {
+        spki = impl_->original_spki;
+    } else {
+        auto encoded = to_spki();
+        if (!encoded) {
+            return std::unexpected(encoded.error());
+        }
+        spki = std::move(*encoded);
     }
 
-    auto hash = sha256(ByteView(spki->data(), spki->size()));
+    auto hash = sha256(ByteView(spki.data(), spki.size()));
     if (!hash) {
         return std::unexpected(hash.error());
     }
@@ -551,10 +565,14 @@ Result<BlindRsaPrivateKey> BlindRsaPrivateKey::from_pkcs8(ByteView pkcs8) {
     BlindRsaPrivateKey key;
 
     const uint8_t* p = pkcs8.data();
-    key.impl_->pkey = d2i_PrivateKey(EVP_PKEY_RSA, nullptr, &p, static_cast<long>(pkcs8.size()));
+    key.impl_->pkey = d2i_AutoPrivateKey(nullptr, &p, static_cast<long>(pkcs8.size()));
 
     if (!key.impl_->pkey) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, get_sanitized_error()});
+    }
+
+    if (!is_rsa_key(key.impl_->pkey)) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSA key"});
     }
 
     return key;
