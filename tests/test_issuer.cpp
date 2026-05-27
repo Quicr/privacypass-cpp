@@ -7,6 +7,17 @@
 using namespace privacy_pass;
 using namespace privacy_pass::crypto;
 
+namespace {
+
+Bytes blind_message(const BlindRsaPublicKey& public_key, std::string_view message) {
+    auto blinding = public_key.blind(
+        ByteView(reinterpret_cast<const uint8_t*>(message.data()), message.size()));
+    REQUIRE(blinding.has_value());
+    return std::move(blinding->blinded_msg);
+}
+
+}  // namespace
+
 TEST_SUITE("PublicIssuer") {
     TEST_CASE("Generate issuer") {
         auto issuer = PublicIssuer::generate();
@@ -21,7 +32,9 @@ TEST_SUITE("PublicIssuer") {
         auto issuer = PublicIssuer::generate();
         REQUIRE(issuer.has_value());
 
-        Bytes blinded(256, 0x42);
+        auto public_key = issuer->public_key();
+        REQUIRE(public_key.has_value());
+        auto blinded = blind_message(*public_key, "issue token");
         auto request = TokenRequest::create(
             TokenType::BLIND_RSA,
             issuer->truncated_key_id(),
@@ -40,7 +53,9 @@ TEST_SUITE("PublicIssuer") {
         auto issuer = PublicIssuer::generate();
         REQUIRE(issuer.has_value());
 
-        Bytes blinded(256, 0x42);
+        auto public_key = issuer->public_key();
+        REQUIRE(public_key.has_value());
+        auto blinded = blind_message(*public_key, "wrong key id");
         auto request = TokenRequest::create(
             TokenType::BLIND_RSA,
             static_cast<uint8_t>(issuer->truncated_key_id() + 1),  // Wrong ID
@@ -72,7 +87,9 @@ TEST_SUITE("PublicIssuer") {
 
         BatchedTokenRequest batch;
         for (int i = 0; i < 5; ++i) {
-            Bytes blinded(256, static_cast<uint8_t>(i));
+            auto public_key = issuer->public_key();
+            REQUIRE(public_key.has_value());
+            auto blinded = blind_message(*public_key, "batch " + std::to_string(i));
             batch.requests.push_back(TokenRequest::create(
                 TokenType::BLIND_RSA,
                 issuer->truncated_key_id(),
@@ -166,7 +183,7 @@ TEST_SUITE("MultiKeyIssuer") {
         REQUIRE(result.has_value());
 
         // Issue RSA token
-        Bytes rsa_blinded(256, 0x11);
+        auto rsa_blinded = blind_message(rsa_keypair->second, "multi key rsa");
         auto rsa_request = TokenRequest::create(
             TokenType::BLIND_RSA, rsa_truncated, std::move(rsa_blinded));
 
