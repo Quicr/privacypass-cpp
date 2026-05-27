@@ -298,6 +298,7 @@ private:
 namespace base64url {
 
 [[nodiscard]] std::string encode(ByteView data);
+[[nodiscard]] std::string encode_padded(ByteView data);
 [[nodiscard]] Result<Bytes> decode(std::string_view encoded);
 
 }  // namespace base64url

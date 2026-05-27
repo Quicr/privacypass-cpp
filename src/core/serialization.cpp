@@ -71,6 +71,14 @@ std::string encode(ByteView data) {
     return result;
 }
 
+std::string encode_padded(ByteView data) {
+    std::string result = encode(data);
+    while ((result.size() % 4) != 0) {
+        result.push_back('=');
+    }
+    return result;
+}
+
 Result<Bytes> decode(std::string_view encoded) {
     if (encoded.empty()) {
         return Bytes{};
