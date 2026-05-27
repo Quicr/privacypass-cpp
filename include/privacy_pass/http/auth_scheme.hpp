@@ -16,7 +16,7 @@ namespace privacy_pass::http {
 // WWW-Authenticate header parameters
 struct ChallengeHeader {
     std::string challenge;      // Base64url-encoded TokenChallenge
-    std::string token_key;      // Base64url-encoded issuer public key
+    std::optional<std::string> token_key;  // Base64url-encoded issuer public key
     std::optional<uint32_t> max_age;  // Optional max-age in seconds
 
     // Format as WWW-Authenticate header value

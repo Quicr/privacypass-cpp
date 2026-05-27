@@ -48,6 +48,7 @@ std::optional<std::pair<std::string, std::string>> parse_auth_param(std::string_
         // Quoted string with escape handling per RFC 7230 Section 3.2.6
         input.remove_prefix(1);
         bool escaped = false;
+        bool closed_quote = false;
 
         while (!input.empty()) {
             char c = input[0];
@@ -61,14 +62,15 @@ std::optional<std::pair<std::string, std::string>> parse_auth_param(std::string_
                 escaped = true;
             } else if (c == '"') {
                 // End of quoted string
+                closed_quote = true;
                 break;
             } else {
                 value.push_back(c);
             }
         }
 
-        if (escaped) {
-            // Trailing backslash without following character
+        if (escaped || !closed_quote) {
+            // Trailing backslash or missing closing quote
             return std::nullopt;
         }
     } else {
@@ -139,9 +141,13 @@ std::vector<std::string_view> split_private_token_challenges(std::string_view he
 std::string ChallengeHeader::format() const {
     std::string result = "PrivateToken challenge=\"";
     result += challenge;
-    result += "\", token-key=\"";
-    result += token_key;
     result += "\"";
+
+    if (token_key) {
+        result += ", token-key=\"";
+        result += *token_key;
+        result += "\"";
+    }
 
     if (max_age) {
         result += ", max-age=";
@@ -200,11 +206,6 @@ Result<std::vector<ChallengeHeader>> ChallengeHeader::parse_all(std::string_view
                 "Missing challenge parameter"});
         }
 
-        if (result.token_key.empty()) {
-            return std::unexpected(Error{ErrorCode::MISSING_PARAMETER,
-                "Missing token-key parameter"});
-        }
-
         results.push_back(std::move(result));
     }
 
@@ -221,7 +222,11 @@ Result<TokenChallenge> ChallengeHeader::decode_challenge() const {
 }
 
 Result<Bytes> ChallengeHeader::decode_token_key() const {
-    return base64url::decode(token_key);
+    if (!token_key) {
+        return std::unexpected(Error{ErrorCode::MISSING_PARAMETER,
+            "Missing token-key parameter"});
+    }
+    return base64url::decode(*token_key);
 }
 
 // AuthorizationHeader implementation
@@ -279,8 +284,8 @@ Result<std::string> build_www_authenticate(
     }
 
     ChallengeHeader header;
-    header.challenge = base64url::encode(ByteView(serialized->data(), serialized->size()));
-    header.token_key = base64url::encode(token_key);
+    header.challenge = base64url::encode_padded(ByteView(serialized->data(), serialized->size()));
+    header.token_key = base64url::encode_padded(token_key);
     header.max_age = max_age;
 
     return header.format();
@@ -293,7 +298,7 @@ Result<std::string> build_authorization(const Token& token) {
     }
 
     AuthorizationHeader header;
-    header.token = base64url::encode(ByteView(serialized->data(), serialized->size()));
+    header.token = base64url::encode_padded(ByteView(serialized->data(), serialized->size()));
 
     return header.format();
 }

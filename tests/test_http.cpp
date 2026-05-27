@@ -32,7 +32,8 @@ TEST_SUITE("HTTP Auth Scheme") {
         REQUIRE(result.has_value());
 
         CHECK(result->challenge == "Y2hhbGxlbmdl");
-        CHECK(result->token_key == "a2V5");
+        REQUIRE(result->token_key.has_value());
+        CHECK(*result->token_key == "a2V5");
         REQUIRE(result->max_age.has_value());
         CHECK(*result->max_age == 300);
     }
@@ -44,7 +45,8 @@ TEST_SUITE("HTTP Auth Scheme") {
         REQUIRE(result.has_value());
 
         CHECK(result->challenge == "Y2hhbGxlbmdl");
-        CHECK(result->token_key == "a2V5");
+        REQUIRE(result->token_key.has_value());
+        CHECK(*result->token_key == "a2V5");
         CHECK(!result->max_age.has_value());
     }
 
@@ -59,9 +61,11 @@ TEST_SUITE("HTTP Auth Scheme") {
             CHECK(!result.has_value());
         }
 
-        SUBCASE("Missing token-key") {
+        SUBCASE("Missing token-key allowed") {
             auto result = ChallengeHeader::parse("PrivateToken challenge=\"abc\"");
-            CHECK(!result.has_value());
+            REQUIRE(result.has_value());
+            CHECK(!result->token_key.has_value());
+            CHECK(!result->decode_token_key().has_value());
         }
     }
 
