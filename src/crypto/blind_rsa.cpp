@@ -722,6 +722,12 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
     }
 
     int mod_size = BN_num_bytes(n_bn);
+    if (blinded_msg.size() != static_cast<size_t>(mod_size)) {
+        BN_free(n_bn);
+        BN_free(d_bn);
+        return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
+            "Blinded message must match RSA modulus size"});
+    }
 
     BN_CTX* bn_ctx = BN_CTX_new();
     BN_MONT_CTX* mont = BN_MONT_CTX_new();
@@ -736,6 +742,17 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
         BN_MONT_CTX_free(mont);
         BN_CTX_free(bn_ctx);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to allocate bignums"});
+    }
+
+    if (BN_is_zero(m) || BN_cmp(m, n_bn) >= 0) {
+        BN_free(n_bn);
+        BN_free(d_bn);
+        BN_free(m);
+        BN_free(sig);
+        BN_MONT_CTX_free(mont);
+        BN_CTX_free(bn_ctx);
+        return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
+            "Blinded message representative out of range"});
     }
 
     if (BN_MONT_CTX_set(mont, n_bn, bn_ctx) != 1) {
