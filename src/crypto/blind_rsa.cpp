@@ -438,13 +438,34 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
 
     // Store inverse in standard form for portable serialization.
     result.inverse.resize(static_cast<size_t>(mod_size));
-    BN_bn2binpad(r_inv, result.inverse.data(), mod_size);
+    if (BN_bn2binpad(r_inv, result.inverse.data(), mod_size) != mod_size) {
+        BN_free(n_bn);
+        BN_free(m);
+        BN_free(e_bn);
+        BN_clear_free(r);
+        BN_clear_free(r_inv);
+        BN_free(x);
+        BN_free(x_mont);
+        BN_free(blinded);
+        BN_MONT_CTX_free(mont);
+        BN_CTX_free(bn_ctx);
+        return std::unexpected(Error{ErrorCode::BLINDING_FAILED, "Failed to serialize inverse"});
+    }
 
     // Store blinded message
     result.blinded_msg.resize(static_cast<size_t>(mod_size));
-    int blinded_len = BN_bn2binpad(blinded, result.blinded_msg.data(), mod_size);
-    if (blinded_len != mod_size) {
-        result.blinded_msg.resize(static_cast<size_t>(blinded_len));
+    if (BN_bn2binpad(blinded, result.blinded_msg.data(), mod_size) != mod_size) {
+        BN_free(n_bn);
+        BN_free(m);
+        BN_free(e_bn);
+        BN_clear_free(r);
+        BN_clear_free(r_inv);
+        BN_free(x);
+        BN_free(x_mont);
+        BN_free(blinded);
+        BN_MONT_CTX_free(mont);
+        BN_CTX_free(bn_ctx);
+        return std::unexpected(Error{ErrorCode::BLINDING_FAILED, "Failed to serialize blinded message"});
     }
 
     BN_free(n_bn);
@@ -506,6 +527,18 @@ Result<Bytes> BlindRsaPublicKey::finalize(
         BN_MONT_CTX_free(mont);
         BN_CTX_free(bn_ctx);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to allocate bignums"});
+    }
+
+    // Reject blind signatures outside [0, n)
+    if (BN_cmp(z, n_bn) >= 0) {
+        BN_free(n_bn);
+        BN_free(z);
+        BN_clear_free(r_inv);
+        BN_clear_free(r_inv_mont);
+        BN_free(sig);
+        BN_MONT_CTX_free(mont);
+        BN_CTX_free(bn_ctx);
+        return std::unexpected(Error{ErrorCode::UNBLINDING_FAILED, "Blind signature out of range"});
     }
 
     if (BN_MONT_CTX_set(mont, n_bn, bn_ctx) != 1) {
