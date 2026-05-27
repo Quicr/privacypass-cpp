@@ -75,6 +75,9 @@ inline std::array<uint8_t, N> fixed_bytes(const Bytes& bytes) {
 }
 
 inline std::string bytes_to_string(const Bytes& bytes) {
+    if (bytes.empty()) {
+        return {};
+    }
     return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 }
 
