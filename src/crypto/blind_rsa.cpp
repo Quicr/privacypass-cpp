@@ -736,14 +736,14 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
 
     if (!n_bn || !d_bn) {
         BN_free(n_bn);
-        BN_free(d_bn);
+        BN_clear_free(d_bn);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get key parameters"});
     }
 
     int mod_size = BN_num_bytes(n_bn);
     if (blinded_msg.size() != static_cast<size_t>(mod_size)) {
         BN_free(n_bn);
-        BN_free(d_bn);
+        BN_clear_free(d_bn);
         return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
             "Blinded message must match RSA modulus size"});
     }
@@ -755,7 +755,7 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
 
     if (!bn_ctx || !mont || !m || !sig) {
         BN_free(n_bn);
-        BN_free(d_bn);
+        BN_clear_free(d_bn);
         BN_free(m);
         BN_free(sig);
         BN_MONT_CTX_free(mont);
@@ -765,7 +765,7 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
 
     if (BN_is_zero(m) || BN_cmp(m, n_bn) >= 0) {
         BN_free(n_bn);
-        BN_free(d_bn);
+        BN_clear_free(d_bn);
         BN_free(m);
         BN_free(sig);
         BN_MONT_CTX_free(mont);
@@ -776,7 +776,7 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
 
     if (BN_MONT_CTX_set(mont, n_bn, bn_ctx) != 1) {
         BN_free(n_bn);
-        BN_free(d_bn);
+        BN_clear_free(d_bn);
         BN_free(m);
         BN_free(sig);
         BN_MONT_CTX_free(mont);
@@ -788,7 +788,7 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
     BN_set_flags(d_bn, BN_FLG_CONSTTIME);
     if (BN_mod_exp_mont_consttime(sig, m, d_bn, n_bn, bn_ctx, mont) != 1) {
         BN_free(n_bn);
-        BN_free(d_bn);
+        BN_clear_free(d_bn);
         BN_free(m);
         BN_free(sig);
         BN_MONT_CTX_free(mont);
@@ -800,7 +800,7 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
     BN_bn2binpad(sig, result.data(), mod_size);
 
     BN_free(n_bn);
-    BN_free(d_bn);
+    BN_clear_free(d_bn);
     BN_free(m);
     BN_free(sig);
     BN_MONT_CTX_free(mont);
