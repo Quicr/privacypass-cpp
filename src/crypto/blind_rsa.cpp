@@ -41,9 +41,8 @@ std::string get_sanitized_error() {
     return "Cryptographic operation failed";
 }
 
-bool is_rsa_key(const EVP_PKEY* key) {
-    const int type = EVP_PKEY_base_id(key);
-    return type == EVP_PKEY_RSA || type == EVP_PKEY_RSA_PSS;
+bool is_rsa_pss_key(const EVP_PKEY* key) {
+    return EVP_PKEY_base_id(key) == EVP_PKEY_RSA_PSS;
 }
 
 // EMSA-PSS encoding for blind RSA (RFC 9474)
@@ -159,8 +158,8 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_spki(ByteView spki) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, get_sanitized_error()});
     }
 
-    if (!is_rsa_key(key.impl_->pkey)) {
-        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSA key"});
+    if (!is_rsa_pss_key(key.impl_->pkey)) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSASSA-PSS key"});
     }
 
     key.impl_->original_spki.assign(spki.begin(), spki.end());
@@ -185,7 +184,7 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_components(ByteView modulus, B
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Failed to create bignums"});
     }
 
-    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA_PSS, nullptr);
     if (!ctx) {
         BN_free(n);
         BN_free(e);
@@ -198,7 +197,7 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_components(ByteView modulus, B
     OSSL_PARAM* params = OSSL_PARAM_BLD_to_param(bld);
 
     EVP_PKEY* pkey = nullptr;
-    EVP_PKEY_CTX* from_data_ctx = EVP_PKEY_CTX_new_from_name(nullptr, "RSA", nullptr);
+    EVP_PKEY_CTX* from_data_ctx = EVP_PKEY_CTX_new_from_name(nullptr, "RSA-PSS", nullptr);
 
     bool success = EVP_PKEY_fromdata_init(from_data_ctx) == 1 &&
                    EVP_PKEY_fromdata(from_data_ctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) == 1;
@@ -211,7 +210,7 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_components(ByteView modulus, B
     BN_free(e);
 
     if (!success || !pkey) {
-        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Failed to create RSA key"});
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Failed to create RSASSA-PSS key"});
     }
 
     key.impl_->pkey = pkey;
@@ -526,7 +525,7 @@ BlindRsaPrivateKey::BlindRsaPrivateKey(BlindRsaPrivateKey&&) noexcept = default;
 BlindRsaPrivateKey& BlindRsaPrivateKey::operator=(BlindRsaPrivateKey&&) noexcept = default;
 
 Result<std::pair<BlindRsaPrivateKey, BlindRsaPublicKey>> BlindRsaPrivateKey::generate() {
-    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA_PSS, nullptr);
     if (!ctx) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create context"});
     }
@@ -571,8 +570,8 @@ Result<BlindRsaPrivateKey> BlindRsaPrivateKey::from_pkcs8(ByteView pkcs8) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, get_sanitized_error()});
     }
 
-    if (!is_rsa_key(key.impl_->pkey)) {
-        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSA key"});
+    if (!is_rsa_pss_key(key.impl_->pkey)) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSASSA-PSS key"});
     }
 
     return key;
