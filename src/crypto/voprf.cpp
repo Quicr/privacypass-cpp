@@ -17,9 +17,10 @@ namespace privacy_pass::crypto {
 
 namespace {
 
-// Domain separation tags for hash-to-curve and DLEQ per RFC 9497
-constexpr const char* DST_H2C = "VOPRF10-P384-SHA384-SSWU-RO";
+// Domain separation tags for OPRF v1, VOPRF mode, P-384/SHA-384.
+constexpr std::string_view DST_H2C = "HashToGroup-OPRFV1-\x01-P384-SHA384";
 constexpr const char* DST_CHALLENGE = "Challenge";
+constexpr std::string_view DST_FINALIZE = "Finalize";
 
 // Maximum input size for OpenSSL APIs (prevent integer truncation)
 constexpr size_t MAX_INPUT_SIZE = static_cast<size_t>(INT_MAX);
@@ -63,6 +64,37 @@ bool constant_time_compare(ByteView a, ByteView b) {
         return false;
     }
     return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
+}
+
+void append_u16(Bytes& out, size_t value) {
+    out.push_back(static_cast<uint8_t>(value >> 8));
+    out.push_back(static_cast<uint8_t>(value));
+}
+
+void append_u16_len_prefixed(Bytes& out, ByteView data) {
+    append_u16(out, data.size());
+    out.insert(out.end(), data.begin(), data.end());
+}
+
+Result<Bytes> finalize_output(ByteView input, ByteView issued_element) {
+    constexpr size_t MAX_U16 = 0xFFFF;
+    if (input.size() > MAX_U16 || issued_element.size() > MAX_U16) {
+        return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
+            "VOPRF finalize input too large"});
+    }
+
+    Bytes hash_input;
+    hash_input.reserve(2 + input.size() + 2 + issued_element.size() + DST_FINALIZE.size());
+    append_u16_len_prefixed(hash_input, input);
+    append_u16_len_prefixed(hash_input, issued_element);
+    hash_input.insert(hash_input.end(), DST_FINALIZE.begin(), DST_FINALIZE.end());
+
+    auto output = sha384(ByteView(hash_input.data(), hash_input.size()));
+    if (!output) {
+        return std::unexpected(output.error());
+    }
+
+    return Bytes(output->begin(), output->end());
 }
 
 // Serialize EC point to compressed form (per RFC 9497 SerializeElement)
@@ -381,8 +413,8 @@ Result<EC_POINT*> hash_to_curve(ByteView input, const EC_GROUP* group) {
 
     // Expand message to get 2 field elements (each 72 bytes for security margin)
     size_t L = 72;  // ceil((ceil(log2(p)) + k) / 8) where k=128
-    auto expanded = expand_message_xmd(input, ByteView(reinterpret_cast<const uint8_t*>(DST_H2C),
-        strlen(DST_H2C)), 2 * L);
+    auto expanded = expand_message_xmd(input, ByteView(
+        reinterpret_cast<const uint8_t*>(DST_H2C.data()), DST_H2C.size()), 2 * L);
     if (!expanded) {
         return std::unexpected(expanded.error());
     }
@@ -1061,13 +1093,9 @@ Result<Bytes> VoprfClient::finalize(
         return std::unexpected(output_point.error());
     }
 
-    // Hash point to final output
-    auto final_output = sha384(ByteView(output_point->data(), output_point->size()));
-    if (!final_output) {
-        return std::unexpected(final_output.error());
-    }
-
-    return Bytes(final_output->begin(), final_output->end());
+    return finalize_output(
+        ByteView(finalization_data.input.data(), finalization_data.input.size()),
+        ByteView(output_point->data(), output_point->size()));
 }
 
 // VoprfServer implementation
@@ -1261,7 +1289,7 @@ Result<bool> VoprfServer::verify_finalize(ByteView input, ByteView output) const
         return std::unexpected(expected_bytes.error());
     }
 
-    auto expected_hash = sha384(ByteView(expected_bytes->data(), expected_bytes->size()));
+    auto expected_hash = finalize_output(input, ByteView(expected_bytes->data(), expected_bytes->size()));
 
     // Clear sensitive data
     scalar_bytes->clear();
