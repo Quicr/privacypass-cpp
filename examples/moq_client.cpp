@@ -29,7 +29,7 @@ void print_hex(const std::string& label, ByteView data, size_t max_bytes = 16) {
 // Example MOQ Client built on TokenProvider
 class MoqClient {
 public:
-    MoqClient() : provider_(TokenProviderConfig{.max_cached_tokens = 10}) {}
+    MoqClient() : provider_(TokenProviderConfig{.max_cached_tokens = 10, .origin_name = "origin.example.com"}) {}
 
     void add_issuer(const std::string& name, const PublicKey& key) {
         provider_.add_issuer_key(name, key);

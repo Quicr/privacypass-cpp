@@ -5,6 +5,8 @@
 #include <privacy_pass/crypto/voprf.hpp>
 
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <cctype>
 #include <mutex>
 #include <unordered_map>
 
@@ -48,6 +50,31 @@ struct TokenProvider::Impl {
     }
 };
 
+namespace {
+
+bool ascii_equal_case_insensitive(std::string_view a, std::string_view b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
+        [](char lhs, char rhs) {
+            return std::tolower(static_cast<unsigned char>(lhs)) ==
+                   std::tolower(static_cast<unsigned char>(rhs));
+        });
+}
+
+bool origin_info_allows(std::string_view origin, const std::vector<std::string>& origin_info) {
+    if (origin_info.empty()) {
+        return true;
+    }
+    if (origin.empty()) {
+        return false;
+    }
+    return std::any_of(origin_info.begin(), origin_info.end(),
+        [&](const std::string& candidate) {
+            return ascii_equal_case_insensitive(origin, candidate);
+        });
+}
+
+}  // namespace
+
 TokenProvider::TokenProvider(TokenProviderConfig config)
     : impl_(std::make_unique<Impl>(std::move(config))) {}
 
@@ -81,6 +108,11 @@ Result<TokenRequestContext> TokenProvider::prepare_request(
     const TokenChallenge& challenge) const {
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
+
+    if (!origin_info_allows(impl_->config.origin_name, challenge.origin_info)) {
+        return std::unexpected(Error{ErrorCode::INVALID_CHALLENGE,
+            "Challenge origin_info does not include current origin"});
+    }
 
     auto key = impl_->find_key(challenge.issuer_name, challenge.token_type);
     if (!key) {
@@ -166,7 +198,7 @@ Result<Token> TokenProvider::finalize(
         // Find the key used for this request
         for (const auto& [issuer, keys] : impl_->issuer_keys) {
             for (const auto& key : keys) {
-                if (key.type == response.token_type) {
+                if (key.type == response.token_type && key.key_id == context.finalization_data.token_key_id) {
                     auto rsa_key = crypto::BlindRsaPublicKey::from_spki(
                         ByteView(key.data.data(), key.data.size()));
                     if (!rsa_key) {
@@ -181,7 +213,7 @@ Result<Token> TokenProvider::finalize(
     } else if (response.token_type == TokenType::VOPRF_P384_SHA384) {
         for (const auto& [issuer, keys] : impl_->issuer_keys) {
             for (const auto& key : keys) {
-                if (key.type == response.token_type) {
+                if (key.type == response.token_type && key.key_id == context.finalization_data.token_key_id) {
                     auto voprf_key = crypto::VoprfPublicKey::from_bytes(
                         ByteView(key.data.data(), key.data.size()));
                     if (!voprf_key) {
