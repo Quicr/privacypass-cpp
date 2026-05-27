@@ -76,9 +76,15 @@ Result<Bytes> decode(std::string_view encoded) {
         return Bytes{};
     }
 
-    // Remove padding if present
+    size_t padding = 0;
     while (!encoded.empty() && encoded.back() == '=') {
         encoded.remove_suffix(1);
+        ++padding;
+    }
+
+    if (padding > 2 || encoded.find('=') != std::string_view::npos || encoded.size() % 4 == 1) {
+        return std::unexpected(Error{ErrorCode::INVALID_BASE64,
+            "Invalid base64url padding"});
     }
 
     if (encoded.empty()) {
