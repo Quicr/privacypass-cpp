@@ -189,21 +189,26 @@ TEST_SUITE("HTTP Auth Scheme") {
                 CAPTURE(file);
                 CAPTURE(vector.dump());
 
-                auto parsed = ChallengeHeader::parse(vector.at("WWW-Authenticate").get<std::string>());
+                auto parsed = ChallengeHeader::parse_all(vector.at("WWW-Authenticate").get<std::string>());
                 REQUIRE(parsed.has_value());
 
-                auto challenge = parsed->decode_challenge();
-                REQUIRE(challenge.has_value());
-                auto challenge_bytes = challenge->serialize();
-                REQUIRE(challenge_bytes.has_value());
-                CHECK(*challenge_bytes == test_vectors::hex_field(vector, "token-challenge-0"));
+                for (size_t i = 0; i < parsed->size(); ++i) {
+                    const auto suffix = std::to_string(i);
+                    CAPTURE(i);
 
-                auto token_key = parsed->decode_token_key();
-                REQUIRE(token_key.has_value());
-                CHECK(*token_key == test_vectors::hex_field(vector, "token-key-0"));
+                    auto challenge = (*parsed)[i].decode_challenge();
+                    REQUIRE(challenge.has_value());
+                    auto challenge_bytes = challenge->serialize();
+                    REQUIRE(challenge_bytes.has_value());
+                    CHECK(*challenge_bytes == test_vectors::hex_field(vector, "token-challenge-" + suffix));
 
-                REQUIRE(parsed->max_age.has_value());
-                CHECK(*parsed->max_age == vector.at("max-age-0").get<uint32_t>());
+                    auto token_key = (*parsed)[i].decode_token_key();
+                    REQUIRE(token_key.has_value());
+                    CHECK(*token_key == test_vectors::hex_field(vector, "token-key-" + suffix));
+
+                    REQUIRE((*parsed)[i].max_age.has_value());
+                    CHECK(*(*parsed)[i].max_age == vector.at("max-age-" + suffix).get<uint32_t>());
+                }
             }
         }
     }
