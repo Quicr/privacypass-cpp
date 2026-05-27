@@ -1,7 +1,5 @@
 # Privacy Pass C++ - Build Commands
 
-set shell := ["zsh", "-cu"]
-
 default:
     @just --list
 
@@ -57,7 +55,7 @@ format-check:
 
 # Static analysis
 lint:
-    clang-tidy src/**/*.cpp -- -I include -std=c++20
+    find src -name '*.cpp' -exec clang-tidy {} -- -I include -std=c++20 \;
 
 # Generate compile_commands.json for IDE support
 compile-commands: configure
