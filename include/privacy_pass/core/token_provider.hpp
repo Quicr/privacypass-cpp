@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 
 namespace privacy_pass {
 
@@ -28,6 +29,7 @@ struct TokenProviderConfig {
     size_t max_cached_tokens{100};
     std::chrono::seconds token_prefetch_threshold{60};
     bool allow_token_reuse{false};  // For testing only
+    std::string origin_name;
 };
 
 // Callback for async token fetching

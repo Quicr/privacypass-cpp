@@ -247,6 +247,7 @@ TEST_SUITE("TokenProvider") {
         TokenProviderConfig config{
             .max_cached_tokens = 50,
             .token_prefetch_threshold = std::chrono::seconds(120),
+            .origin_name = "origin.example.com",
         };
 
         TokenProvider provider(config);
