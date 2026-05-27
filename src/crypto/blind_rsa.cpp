@@ -19,8 +19,9 @@ namespace privacy_pass::crypto {
 
 namespace {
 
-// RSASSA-PSS parameters for Privacy Pass
+// RSASSA-PSS parameters for Privacy Pass and RFC 9474 vectors.
 constexpr int RSA_BITS = 2048;
+constexpr int RSA_MAX_BITS = 4096;
 constexpr int SALT_LENGTH = 48;  // SHA-384 output size
 
 // Maximum input size for OpenSSL APIs (prevent integer truncation)
@@ -63,12 +64,14 @@ Result<void> validate_rsa_pss_params(const EVP_PKEY* key) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Missing RSA key parameters"});
     }
 
-    const bool key_params_ok = BN_num_bits(n) == RSA_BITS && BN_is_word(e, RSA_PUBLIC_EXPONENT) == 1;
+    const int n_bits = BN_num_bits(n);
+    const bool key_params_ok = (n_bits == RSA_BITS || n_bits == RSA_MAX_BITS) &&
+                               BN_is_word(e, RSA_PUBLIC_EXPONENT) == 1;
     BN_free(n);
     BN_free(e);
     if (!key_params_ok) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY,
-            "RSASSA-PSS key must use RSA-2048 and exponent 65537"});
+            "RSASSA-PSS key must use RSA-2048 or RSA-4096 and exponent 65537"});
     }
 
     int salt_len = 0;

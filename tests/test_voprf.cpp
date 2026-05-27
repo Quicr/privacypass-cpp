@@ -248,4 +248,41 @@ TEST_SUITE("VOPRF") {
             }
         }
     }
+
+    TEST_CASE("RFC 9497 P-384 VOPRF vectors finalize") {
+        const auto vector_set = test_vectors::load_json("voprf_p384_v20.json");
+
+        auto private_key = VoprfPrivateKey::from_bytes(
+            test_vectors::view(test_vectors::hex_field(vector_set, "skSm")));
+        REQUIRE(private_key.has_value());
+
+        auto public_key = private_key->public_key();
+        REQUIRE(public_key.has_value());
+        auto public_key_bytes = public_key->to_bytes();
+        REQUIRE(public_key_bytes.has_value());
+        CHECK(*public_key_bytes == test_vectors::hex_field(vector_set, "pkSm"));
+
+        for (const auto& vector : vector_set.at("vectors")) {
+            CAPTURE(vector.dump());
+
+            auto client_key = VoprfPublicKey::from_bytes(
+                test_vectors::view(test_vectors::hex_field(vector_set, "pkSm")));
+            REQUIRE(client_key.has_value());
+
+            VoprfClient client(std::move(*client_key));
+            VoprfFinalizationData finalization;
+            finalization.blind_scalar = SecureBytes(test_vectors::view(test_vectors::hex_field(vector, "Blind")));
+            finalization.blinded_element = test_vectors::hex_field(vector, "BlindedElement");
+            finalization.input = test_vectors::hex_field(vector, "Input");
+
+            VoprfEvaluation evaluation{
+                .evaluated_element = test_vectors::hex_field(vector, "EvaluationElement"),
+                .proof = test_vectors::hex_field(vector, "Proof"),
+            };
+
+            auto output = client.finalize(finalization, evaluation);
+            REQUIRE(output.has_value());
+            CHECK(*output == test_vectors::hex_field(vector, "Output"));
+        }
+    }
 }
