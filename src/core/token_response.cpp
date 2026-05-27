@@ -32,16 +32,16 @@ Result<Bytes> VoprfTokenResponse::serialize() const {
 }
 
 Result<VoprfTokenResponse> VoprfTokenResponse::deserialize(ByteView data) {
-    constexpr size_t EXPECTED_SIZE = 97 + 96;  // Ne + 2*Ns for P-384
+    constexpr size_t EXPECTED_SIZE = 49 + 96;  // Ne + 2*Ns for P-384
 
     if (data.size() != EXPECTED_SIZE) {
         return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
-            "VOPRF response must be 193 bytes"});
+            "VOPRF response must be 145 bytes"});
     }
 
     VoprfTokenResponse response;
-    response.evaluate_msg.assign(data.begin(), data.begin() + 97);
-    response.evaluate_proof.assign(data.begin() + 97, data.end());
+    response.evaluate_msg.assign(data.begin(), data.begin() + 49);
+    response.evaluate_proof.assign(data.begin() + 49, data.end());
     return response;
 }
 

@@ -47,7 +47,7 @@ TEST_SUITE("TokenRequest") {
     }
 
     TEST_CASE("Serialization roundtrip - VOPRF") {
-        Bytes blinded(97, 0x33);  // P-384 element size
+        Bytes blinded(49, 0x33);  // P-384 element size
 
         auto original = TokenRequest::create(
             TokenType::VOPRF_P384_SHA384,
@@ -63,7 +63,7 @@ TEST_SUITE("TokenRequest") {
 
         CHECK(restored->token_type == TokenType::VOPRF_P384_SHA384);
         CHECK(restored->truncated_token_key_id == 0x99);
-        CHECK(restored->blinded_msg.size() == 97);
+        CHECK(restored->blinded_msg.size() == 49);
     }
 
     TEST_CASE("Serialized size") {

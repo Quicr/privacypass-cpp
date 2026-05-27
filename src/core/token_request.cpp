@@ -64,6 +64,10 @@ Result<TokenRequest> TokenRequest::deserialize(ByteView data) {
 
     request.blinded_msg.assign(blinded->begin(), blinded->end());
 
+    if (!reader.empty()) {
+        return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Trailing TokenRequest data"});
+    }
+
     return request;
 }
 

@@ -14,7 +14,7 @@ namespace privacy_pass {
 struct TokenRequest {
     TokenType token_type;
     uint8_t truncated_token_key_id;  // LSB of full key ID
-    Bytes blinded_msg;               // Nk bytes for RSA, 97 bytes for VOPRF P-384
+    Bytes blinded_msg;               // Nk bytes for RSA, 49 bytes for VOPRF P-384
 
     // Create a token request
     static TokenRequest create(

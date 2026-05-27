@@ -65,14 +65,14 @@ bool constant_time_compare(ByteView a, ByteView b) {
     return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
 }
 
-// Serialize EC point to uncompressed form (per RFC 9497)
+// Serialize EC point to compressed form (per RFC 9497 SerializeElement)
 Result<Bytes> point_to_bytes(const EC_POINT* point, const EC_GROUP* group) {
     BN_CTX* ctx = BN_CTX_new();
     if (!ctx) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create BN context"});
     }
 
-    size_t len = EC_POINT_point2oct(group, point, POINT_CONVERSION_UNCOMPRESSED,
+    size_t len = EC_POINT_point2oct(group, point, POINT_CONVERSION_COMPRESSED,
         nullptr, 0, ctx);
 
     if (len == 0) {
@@ -81,7 +81,7 @@ Result<Bytes> point_to_bytes(const EC_POINT* point, const EC_GROUP* group) {
     }
 
     Bytes result(len);
-    if (EC_POINT_point2oct(group, point, POINT_CONVERSION_UNCOMPRESSED,
+    if (EC_POINT_point2oct(group, point, POINT_CONVERSION_COMPRESSED,
             result.data(), len, ctx) != len) {
         BN_CTX_free(ctx);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to serialize point"});

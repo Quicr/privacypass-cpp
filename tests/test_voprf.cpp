@@ -28,7 +28,7 @@ TEST_SUITE("VOPRF") {
         SUBCASE("Public key roundtrip") {
             auto bytes = public_key.to_bytes();
             REQUIRE(bytes.has_value());
-            CHECK(bytes->size() == P384_ELEMENT_SIZE);  // 97 bytes compressed
+            CHECK(bytes->size() == P384_ELEMENT_SIZE);
 
             auto restored = VoprfPublicKey::from_bytes(
                 ByteView(bytes->data(), bytes->size()));

@@ -12,7 +12,7 @@ namespace privacy_pass::crypto {
 // Supports P-384 with SHA-384
 
 // P-384 constants
-constexpr size_t P384_ELEMENT_SIZE = 97;   // Uncompressed point (1 + 48 + 48)
+constexpr size_t P384_ELEMENT_SIZE = 49;   // Compressed point (1 + 48)
 constexpr size_t P384_SCALAR_SIZE = 48;
 constexpr size_t P384_OUTPUT_SIZE = 48;
 constexpr size_t P384_PROOF_SIZE = 96;     // 2 * scalar size
