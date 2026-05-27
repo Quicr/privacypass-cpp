@@ -116,20 +116,29 @@ Result<BatchedTokenRequest> BatchedTokenRequest::deserialize(ByteView data) {
     result.requests.reserve(static_cast<size_t>(*count));
 
     for (uint64_t i = 0; i < *count; ++i) {
-        // Read type to determine size
-        auto type_peek = reader.peek_u8();
-        if (!type_peek) {
-            return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to peek token_type"});
+        auto remaining = reader.remaining_data();
+        if (remaining.size() < 3) {
+            return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read request header"});
         }
 
-        // Parse individual request from remaining data
-        auto req = TokenRequest::deserialize(reader.remaining_data());
+        const auto type = static_cast<TokenType>(
+            (static_cast<uint16_t>(remaining[0]) << 8) | remaining[1]);
+        const auto info = TokenTypeInfo::for_type(type);
+        if (info.blinded_element_size == 0) {
+            return std::unexpected(Error{ErrorCode::UNSUPPORTED_TOKEN_TYPE,
+                "Unsupported batched request token type"});
+        }
+
+        const size_t request_size = 2 + 1 + info.blinded_element_size;
+        auto request_bytes = reader.read_bytes(request_size);
+        if (!request_bytes) {
+            return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read request"});
+        }
+
+        auto req = TokenRequest::deserialize(*request_bytes);
         if (!req) {
             return std::unexpected(req.error());
         }
-
-        // Skip past the request we just parsed
-        reader.skip(req->serialized_size());
 
         result.requests.push_back(std::move(*req));
     }
