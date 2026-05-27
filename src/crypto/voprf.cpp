@@ -34,6 +34,9 @@ class P384Group {
 public:
     static EC_GROUP* get() {
         static P384Group instance;
+        if (!instance.group_) {
+            return nullptr;
+        }
         return instance.group_;
     }
 
@@ -46,9 +49,6 @@ public:
 private:
     P384Group() {
         group_ = EC_GROUP_new_by_curve_name(NID_secp384r1);
-        if (!group_) {
-            spdlog::error("Failed to create P-384 group");
-        }
     }
 
     P384Group(const P384Group&) = delete;
@@ -615,7 +615,10 @@ Result<Bytes> generate_dleq_proof(
     BN_CTX* ctx) {
 
     BIGNUM* order = BN_new();
-    EC_GROUP_get_order(group, order, ctx);
+    if (!order || EC_GROUP_get_order(group, order, ctx) != 1) {
+        BN_free(order);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
+    }
 
     auto composites = compute_composites(group, Y, R, Z, ctx);
     if (!composites) {
@@ -720,6 +723,24 @@ Result<bool> verify_dleq_proof(
         BN_free(s);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to parse proof"});
     }
+
+    // Validate scalars are in range [1, order-1]
+    BIGNUM* order = BN_new();
+    if (!order || EC_GROUP_get_order(group, order, ctx) != 1) {
+        BN_free(c);
+        BN_free(s);
+        BN_free(order);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
+    }
+
+    if (BN_is_zero(c) || BN_is_zero(s) ||
+        BN_cmp(c, order) >= 0 || BN_cmp(s, order) >= 0) {
+        BN_free(c);
+        BN_free(s);
+        BN_free(order);
+        return std::unexpected(Error{ErrorCode::VERIFICATION_FAILED, "Proof scalars out of range"});
+    }
+    BN_free(order);
 
     auto composites = compute_composites(group, Y, R, Z, ctx);
     if (!composites) {
@@ -893,7 +914,11 @@ Result<std::pair<VoprfPrivateKey, VoprfPublicKey>> VoprfPrivateKey::generate() {
     }
 
     BIGNUM* order = BN_new();
-    EC_GROUP_get_order(private_key.impl_->group, order, ctx);
+    if (!order || EC_GROUP_get_order(private_key.impl_->group, order, ctx) != 1) {
+        BN_free(order);
+        BN_CTX_free(ctx);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
+    }
 
     private_key.impl_->scalar = BN_new();
     if (!BN_rand_range(private_key.impl_->scalar, order) ||
@@ -1010,6 +1035,9 @@ VoprfClient& VoprfClient::operator=(VoprfClient&&) noexcept = default;
 
 Result<VoprfFinalizationData> VoprfClient::blind(ByteView input) const {
     EC_GROUP* group = get_p384_group();
+    if (!group) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
+    }
 
     // Hash input to curve point
     auto h_result = hash_to_curve(input, group);
@@ -1026,7 +1054,12 @@ Result<VoprfFinalizationData> VoprfClient::blind(ByteView input) const {
 
     // Generate random blinding scalar r
     BIGNUM* order = BN_new();
-    EC_GROUP_get_order(group, order, ctx);
+    if (!order || EC_GROUP_get_order(group, order, ctx) != 1) {
+        BN_free(order);
+        BN_CTX_free(ctx);
+        EC_POINT_free(P);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
+    }
 
     BIGNUM* r = BN_new();
     if (!BN_rand_range(r, order) || BN_is_zero(r)) {
@@ -1169,7 +1202,13 @@ Result<Bytes> VoprfClient::finalize(
 
     // Compute r^-1
     BIGNUM* order = BN_new();
-    EC_GROUP_get_order(group, order, ctx);
+    if (!order || EC_GROUP_get_order(group, order, ctx) != 1) {
+        BN_clear_free(r);
+        BN_free(order);
+        BN_CTX_free(ctx);
+        EC_POINT_free(Z);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
+    }
 
     BIGNUM* r_inv = BN_mod_inverse(nullptr, r, order, ctx);
     if (!r_inv) {
