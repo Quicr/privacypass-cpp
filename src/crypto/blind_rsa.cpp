@@ -46,80 +46,39 @@ bool is_rsa_pss_key(const EVP_PKEY* key) {
 }
 
 // EMSA-PSS encoding for blind RSA (RFC 9474)
-Result<Bytes> emsa_pss_encode(ByteView msg, size_t emLen) {
-    // Hash the message with SHA-384
+Result<Bytes> emsa_pss_encode(EVP_PKEY* pkey, ByteView msg) {
     auto mHash = sha384(msg);
     if (!mHash) {
         return std::unexpected(mHash.error());
     }
 
-    // Generate random salt
-    auto salt_result = random_bytes(SALT_LENGTH);
-    if (!salt_result) {
-        return std::unexpected(salt_result.error());
-    }
-    const auto& salt = *salt_result;
-
-    // Build M' = (0x)00 00 00 00 00 00 00 00 || mHash || salt
-    Bytes m_prime(8 + 48 + SALT_LENGTH);
-    std::fill(m_prime.begin(), m_prime.begin() + 8, 0);
-    std::copy(mHash->begin(), mHash->end(), m_prime.begin() + 8);
-    std::copy(salt.begin(), salt.end(), m_prime.begin() + 8 + 48);
-
-    // H = Hash(M')
-    auto H = sha384(ByteView(m_prime.data(), m_prime.size()));
-    if (!H) {
-        return std::unexpected(H.error());
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    RSA* rsa = EVP_PKEY_get1_RSA(pkey);
+    if (!rsa) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Failed to get RSA key"});
     }
 
-    // Generate MGF1 mask
-    size_t dbLen = emLen - 48 - 1;
-    Bytes DB(dbLen);
+    Bytes encoded(static_cast<size_t>(RSA_size(rsa)));
+    const int ok = RSA_padding_add_PKCS1_PSS_mgf1(
+        rsa,
+        encoded.data(),
+        mHash->data(),
+        EVP_sha384(),
+        EVP_sha384(),
+        SALT_LENGTH);
+    RSA_free(rsa);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
-    // PS = zeros, DB = PS || 0x01 || salt
-    std::fill(DB.begin(), DB.end() - SALT_LENGTH - 1, 0);
-    DB[dbLen - SALT_LENGTH - 1] = 0x01;
-    std::copy(salt.begin(), salt.end(), DB.end() - SALT_LENGTH);
-
-    // MGF1 with SHA-384
-    Bytes dbMask(dbLen);
-    size_t counter = 0;
-    size_t offset = 0;
-    while (offset < dbLen) {
-        Bytes c_input(48 + 4);
-        std::copy(H->begin(), H->end(), c_input.begin());
-        c_input[48] = static_cast<uint8_t>(counter >> 24);
-        c_input[49] = static_cast<uint8_t>(counter >> 16);
-        c_input[50] = static_cast<uint8_t>(counter >> 8);
-        c_input[51] = static_cast<uint8_t>(counter);
-
-        auto c_hash = sha384(ByteView(c_input.data(), c_input.size()));
-        if (!c_hash) {
-            return std::unexpected(c_hash.error());
-        }
-
-        size_t to_copy = std::min(static_cast<size_t>(48), dbLen - offset);
-        std::copy(c_hash->begin(), c_hash->begin() + to_copy, dbMask.begin() + offset);
-        offset += to_copy;
-        counter++;
+    if (ok != 1) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, get_sanitized_error()});
     }
 
-    // maskedDB = DB XOR dbMask
-    Bytes maskedDB(dbLen);
-    for (size_t i = 0; i < dbLen; i++) {
-        maskedDB[i] = DB[i] ^ dbMask[i];
-    }
-
-    // Clear top bits
-    maskedDB[0] &= 0x7F;
-
-    // EM = maskedDB || H || 0xbc
-    Bytes EM(emLen);
-    std::copy(maskedDB.begin(), maskedDB.end(), EM.begin());
-    std::copy(H->begin(), H->end(), EM.begin() + dbLen);
-    EM[emLen - 1] = 0xBC;
-
-    return EM;
+    return encoded;
 }
 
 }  // namespace
@@ -277,7 +236,7 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
     int mod_size = BN_num_bytes(n_bn);
 
     // EMSA-PSS encode the message
-    auto encoded = emsa_pss_encode(msg, static_cast<size_t>(mod_size));
+    auto encoded = emsa_pss_encode(impl_->pkey, msg);
     if (!encoded) {
         BN_free(n_bn);
         return std::unexpected(encoded.error());
