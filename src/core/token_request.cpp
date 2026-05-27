@@ -73,17 +73,22 @@ Result<TokenRequest> TokenRequest::deserialize(ByteView data) {
 
 // BatchedTokenRequest implementation
 size_t BatchedTokenRequest::serialized_size() const noexcept {
-    size_t size = varint_size(requests.size());
+    size_t payload_size = 0;
     for (const auto& req : requests) {
-        size += req.serialized_size();
+        payload_size += req.serialized_size();
     }
-    return size;
+    return varint_size(payload_size) + payload_size;
 }
 
 Result<Bytes> BatchedTokenRequest::serialize() const {
     ByteWriter writer(serialized_size());
 
-    writer.write_varint(requests.size());
+    size_t payload_size = 0;
+    for (const auto& req : requests) {
+        payload_size += req.serialized_size();
+    }
+    writer.write_varint(payload_size);
+
     for (const auto& req : requests) {
         auto serialized = req.serialize();
         if (!serialized) {
@@ -96,27 +101,39 @@ Result<Bytes> BatchedTokenRequest::serialize() const {
 }
 
 // Maximum batch size to prevent memory exhaustion
-constexpr uint64_t MAX_BATCH_SIZE = 10000;
+constexpr size_t MAX_BATCH_SIZE = 10000;
+constexpr uint64_t MAX_BATCH_PAYLOAD_SIZE = 65535;
 
 Result<BatchedTokenRequest> BatchedTokenRequest::deserialize(ByteView data) {
     ByteReader reader(data);
 
-    auto count = reader.read_varint();
-    if (!count) {
-        return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read request count"});
+    auto payload_size_value = reader.read_varint();
+    if (!payload_size_value) {
+        return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read batch size"});
+    }
+    if (*payload_size_value > MAX_BATCH_PAYLOAD_SIZE) {
+        return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Batch payload too large"});
     }
 
-    // Enforce maximum batch size
-    if (*count > MAX_BATCH_SIZE) {
-        return std::unexpected(Error{ErrorCode::MALFORMED_DATA,
-            "Batch size exceeds maximum: " + std::to_string(*count)});
+    auto payload = reader.read_bytes(static_cast<size_t>(*payload_size_value));
+    if (!payload) {
+        return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read batch payload"});
     }
+    if (!reader.empty()) {
+        return std::unexpected(Error{ErrorCode::MALFORMED_DATA, "Trailing BatchedTokenRequest data"});
+    }
+
+    ByteReader payload_reader(*payload);
 
     BatchedTokenRequest result;
-    result.requests.reserve(static_cast<size_t>(*count));
 
-    for (uint64_t i = 0; i < *count; ++i) {
-        auto remaining = reader.remaining_data();
+    while (!payload_reader.empty()) {
+        if (result.requests.size() >= MAX_BATCH_SIZE) {
+            return std::unexpected(Error{ErrorCode::MALFORMED_DATA,
+                "Batch size exceeds maximum"});
+        }
+
+        auto remaining = payload_reader.remaining_data();
         if (remaining.size() < 3) {
             return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read request header"});
         }
@@ -130,7 +147,7 @@ Result<BatchedTokenRequest> BatchedTokenRequest::deserialize(ByteView data) {
         }
 
         const size_t request_size = 2 + 1 + info.blinded_element_size;
-        auto request_bytes = reader.read_bytes(request_size);
+        auto request_bytes = payload_reader.read_bytes(request_size);
         if (!request_bytes) {
             return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read request"});
         }

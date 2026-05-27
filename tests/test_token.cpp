@@ -238,6 +238,31 @@ TEST_SUITE("Token") {
             }
         }
     }
+
+    TEST_CASE("generic batched token vectors contain valid tokens") {
+        const std::array files{
+            "generic_batched_tokens_v6_go.json",
+            "generic_batched_tokens_v6_rs.json",
+        };
+
+        for (const auto* file : files) {
+            const auto vectors = test_vectors::load_json(file);
+            for (const auto& vector : vectors) {
+                CAPTURE(file);
+                CAPTURE(vector.dump());
+
+                for (const auto& issuance : vector.at("issuance")) {
+                    const auto token_bytes = test_vectors::hex_field(issuance, "token");
+                    auto token = Token::deserialize(test_vectors::view(token_bytes));
+                    REQUIRE(token.has_value());
+
+                    auto serialized = token->serialize();
+                    REQUIRE(serialized.has_value());
+                    CHECK(*serialized == token_bytes);
+                }
+            }
+        }
+    }
 }
 
 TEST_SUITE("AuthenticatorInput") {
