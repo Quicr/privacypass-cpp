@@ -18,8 +18,12 @@ namespace privacy_pass::crypto {
 namespace {
 
 // Domain separation tags for OPRF v1, VOPRF mode, P-384/SHA-384.
+constexpr std::string_view CONTEXT_STRING = "OPRFV1-\x01-P384-SHA384";
 constexpr std::string_view DST_H2C = "HashToGroup-OPRFV1-\x01-P384-SHA384";
-constexpr const char* DST_CHALLENGE = "Challenge";
+constexpr std::string_view DST_H2S = "HashToScalar-OPRFV1-\x01-P384-SHA384";
+constexpr std::string_view DST_CHALLENGE = "Challenge";
+constexpr std::string_view DST_COMPOSITE = "Composite";
+constexpr std::string_view DST_SEED_PREFIX = "Seed-";
 constexpr std::string_view DST_FINALIZE = "Finalize";
 
 // Maximum input size for OpenSSL APIs (prevent integer truncation)
@@ -123,9 +127,9 @@ Result<Bytes> point_to_bytes(const EC_POINT* point, const EC_GROUP* group) {
     return result;
 }
 
-// Deserialize EC point with validation (accepts both compressed and uncompressed forms)
+// Deserialize EC point with RFC 9497 P-384 validation.
 EC_POINT* bytes_to_point(ByteView data, const EC_GROUP* group) {
-    if (data.size() > MAX_INPUT_SIZE) {
+    if (data.size() != P384_ELEMENT_SIZE || (data[0] != 0x02 && data[0] != 0x03)) {
         return nullptr;
     }
 
@@ -146,8 +150,9 @@ EC_POINT* bytes_to_point(ByteView data, const EC_GROUP* group) {
         return nullptr;
     }
 
-    // Validate point is on the curve
-    if (EC_POINT_is_on_curve(group, point, ctx) != 1) {
+    // Validate point is on the curve and not the identity.
+    if (EC_POINT_is_on_curve(group, point, ctx) != 1 ||
+        EC_POINT_is_at_infinity(group, point) == 1) {
         EC_POINT_free(point);
         BN_CTX_free(ctx);
         return nullptr;
@@ -481,55 +486,123 @@ Result<EC_POINT*> hash_to_curve(ByteView input, const EC_GROUP* group) {
     return R;
 }
 
-// Compute DLEQ challenge per RFC 9497 Section 3.3.2
-Result<BIGNUM*> compute_dleq_challenge(
+Result<BIGNUM*> hash_to_scalar(ByteView input, const EC_GROUP* group, BN_CTX* ctx) {
+    constexpr size_t L = 72;
+    auto uniform = expand_message_xmd(input,
+        ByteView(reinterpret_cast<const uint8_t*>(DST_H2S.data()), DST_H2S.size()), L);
+    if (!uniform) {
+        return std::unexpected(uniform.error());
+    }
+
+    BIGNUM* order = BN_new();
+    BIGNUM* scalar = BN_bin2bn(uniform->data(), static_cast<int>(uniform->size()), nullptr);
+    if (!order || !scalar || EC_GROUP_get_order(group, order, ctx) != 1 ||
+        BN_mod(scalar, scalar, order, ctx) != 1) {
+        BN_free(order);
+        BN_free(scalar);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to hash to scalar"});
+    }
+
+    BN_free(order);
+    return scalar;
+}
+
+void append_string(Bytes& out, std::string_view value) {
+    out.insert(out.end(), value.begin(), value.end());
+}
+
+Result<BIGNUM*> compute_composite_scalar(
     const EC_GROUP* group,
-    const EC_POINT* A,
     const EC_POINT* B,
     const EC_POINT* C,
     const EC_POINT* D,
     BN_CTX* ctx) {
 
-    // c = H(G, Y, A, B, C, D) where G is generator, Y is public key
-    // For VOPRF: A=blinded, B=evaluated, C=G, D=Y
-
-    const EC_POINT* G = EC_GROUP_get0_generator(group);
-
-    Bytes input;
-
-    // Serialize all points
-    auto G_bytes = point_to_bytes(G, group);
-    auto A_bytes = point_to_bytes(A, group);
-    auto B_bytes = point_to_bytes(B, group);
-    auto C_bytes = point_to_bytes(C, group);
-    auto D_bytes = point_to_bytes(D, group);
-
-    if (!G_bytes || !A_bytes || !B_bytes || !C_bytes || !D_bytes) {
-        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to serialize points"});
+    auto Bm = point_to_bytes(B, group);
+    auto Ci = point_to_bytes(C, group);
+    auto Di = point_to_bytes(D, group);
+    if (!Bm || !Ci || !Di) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to serialize composite inputs"});
     }
 
-    // Concatenate: DST || G || Y || A || B || C || D
-    input.insert(input.end(), reinterpret_cast<const uint8_t*>(DST_CHALLENGE),
-        reinterpret_cast<const uint8_t*>(DST_CHALLENGE) + strlen(DST_CHALLENGE));
-    input.insert(input.end(), G_bytes->begin(), G_bytes->end());
-    input.insert(input.end(), C_bytes->begin(), C_bytes->end());  // C is public key Y
-    input.insert(input.end(), A_bytes->begin(), A_bytes->end());
-    input.insert(input.end(), B_bytes->begin(), B_bytes->end());
-    input.insert(input.end(), D_bytes->begin(), D_bytes->end());
+    Bytes seed_dst;
+    append_string(seed_dst, DST_SEED_PREFIX);
+    append_string(seed_dst, CONTEXT_STRING);
 
-    auto hash = sha384(ByteView(input.data(), input.size()));
-    if (!hash) {
-        return std::unexpected(hash.error());
+    Bytes seed_transcript;
+    append_u16_len_prefixed(seed_transcript, ByteView(Bm->data(), Bm->size()));
+    append_u16_len_prefixed(seed_transcript, ByteView(seed_dst.data(), seed_dst.size()));
+
+    auto seed = sha384(ByteView(seed_transcript.data(), seed_transcript.size()));
+    if (!seed) {
+        return std::unexpected(seed.error());
     }
 
-    BIGNUM* order = BN_new();
-    EC_GROUP_get_order(group, order, ctx);
+    Bytes composite_transcript;
+    append_u16_len_prefixed(composite_transcript, ByteView(seed->data(), seed->size()));
+    append_u16(composite_transcript, 0);
+    append_u16_len_prefixed(composite_transcript, ByteView(Ci->data(), Ci->size()));
+    append_u16_len_prefixed(composite_transcript, ByteView(Di->data(), Di->size()));
+    append_string(composite_transcript, DST_COMPOSITE);
 
-    BIGNUM* c = BN_bin2bn(hash->data(), static_cast<int>(hash->size()), nullptr);
-    BN_mod(c, c, order, ctx);
-    BN_free(order);
+    return hash_to_scalar(ByteView(composite_transcript.data(), composite_transcript.size()), group, ctx);
+}
 
-    return c;
+Result<std::pair<EC_POINT*, EC_POINT*>> compute_composites(
+    const EC_GROUP* group,
+    const EC_POINT* B,
+    const EC_POINT* C,
+    const EC_POINT* D,
+    BN_CTX* ctx) {
+
+    auto di_result = compute_composite_scalar(group, B, C, D, ctx);
+    if (!di_result) {
+        return std::unexpected(di_result.error());
+    }
+    BIGNUM* di = *di_result;
+
+    EC_POINT* M = EC_POINT_new(group);
+    EC_POINT* Z = EC_POINT_new(group);
+    if (!M || !Z ||
+        EC_POINT_mul(group, M, nullptr, C, di, ctx) != 1 ||
+        EC_POINT_mul(group, Z, nullptr, D, di, ctx) != 1) {
+        EC_POINT_free(M);
+        EC_POINT_free(Z);
+        BN_free(di);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute composites"});
+    }
+
+    BN_free(di);
+    return std::make_pair(M, Z);
+}
+
+Result<BIGNUM*> compute_dleq_challenge(
+    const EC_GROUP* group,
+    const EC_POINT* B,
+    const EC_POINT* M,
+    const EC_POINT* Z,
+    const EC_POINT* t2,
+    const EC_POINT* t3,
+    BN_CTX* ctx) {
+
+    auto Bm = point_to_bytes(B, group);
+    auto a0 = point_to_bytes(M, group);
+    auto a1 = point_to_bytes(Z, group);
+    auto a2 = point_to_bytes(t2, group);
+    auto a3 = point_to_bytes(t3, group);
+    if (!Bm || !a0 || !a1 || !a2 || !a3) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to serialize challenge inputs"});
+    }
+
+    Bytes transcript;
+    append_u16_len_prefixed(transcript, ByteView(Bm->data(), Bm->size()));
+    append_u16_len_prefixed(transcript, ByteView(a0->data(), a0->size()));
+    append_u16_len_prefixed(transcript, ByteView(a1->data(), a1->size()));
+    append_u16_len_prefixed(transcript, ByteView(a2->data(), a2->size()));
+    append_u16_len_prefixed(transcript, ByteView(a3->data(), a3->size()));
+    append_string(transcript, DST_CHALLENGE);
+
+    return hash_to_scalar(ByteView(transcript.data(), transcript.size()), group, ctx);
 }
 
 // Generate DLEQ proof per RFC 9497
@@ -544,9 +617,19 @@ Result<Bytes> generate_dleq_proof(
     BIGNUM* order = BN_new();
     EC_GROUP_get_order(group, order, ctx);
 
+    auto composites = compute_composites(group, Y, R, Z, ctx);
+    if (!composites) {
+        BN_free(order);
+        return std::unexpected(composites.error());
+    }
+    EC_POINT* M = composites->first;
+    EC_POINT* composite_Z = composites->second;
+
     // Generate random scalar t
     BIGNUM* t = BN_new();
     if (!BN_rand_range(t, order) || BN_is_zero(t)) {
+        EC_POINT_free(M);
+        EC_POINT_free(composite_Z);
         BN_free(order);
         BN_free(t);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to generate random scalar"});
@@ -556,26 +639,31 @@ Result<Bytes> generate_dleq_proof(
     EC_POINT* A = EC_POINT_new(group);
     if (!A || EC_POINT_mul(group, A, t, nullptr, nullptr, ctx) != 1) {
         EC_POINT_free(A);
+        EC_POINT_free(M);
+        EC_POINT_free(composite_Z);
         BN_free(order);
         BN_free(t);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute A"});
     }
 
-    // B = t * R
+    // B = t * M
     EC_POINT* B = EC_POINT_new(group);
-    if (!B || EC_POINT_mul(group, B, nullptr, R, t, ctx) != 1) {
+    if (!B || EC_POINT_mul(group, B, nullptr, M, t, ctx) != 1) {
         EC_POINT_free(A);
         EC_POINT_free(B);
+        EC_POINT_free(M);
+        EC_POINT_free(composite_Z);
         BN_free(order);
         BN_free(t);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute B"});
     }
 
-    // c = H(G, Y, R, Z, A, B)
-    auto c_result = compute_dleq_challenge(group, R, Z, Y, A, ctx);
+    auto c_result = compute_dleq_challenge(group, Y, M, composite_Z, A, B, ctx);
     if (!c_result) {
         EC_POINT_free(A);
         EC_POINT_free(B);
+        EC_POINT_free(M);
+        EC_POINT_free(composite_Z);
         BN_free(order);
         BN_free(t);
         return std::unexpected(c_result.error());
@@ -595,6 +683,8 @@ Result<Bytes> generate_dleq_proof(
 
     EC_POINT_free(A);
     EC_POINT_free(B);
+    EC_POINT_free(M);
+    EC_POINT_free(composite_Z);
     BN_free(order);
     BN_free(t);
     BN_free(c);
@@ -631,40 +721,54 @@ Result<bool> verify_dleq_proof(
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to parse proof"});
     }
 
+    auto composites = compute_composites(group, Y, R, Z, ctx);
+    if (!composites) {
+        BN_free(c);
+        BN_free(s);
+        return std::unexpected(composites.error());
+    }
+    EC_POINT* M = composites->first;
+    EC_POINT* composite_Z = composites->second;
+
     // A' = s * G + c * Y (G is the generator, implicit in EC_POINT_mul with non-null first scalar)
     EC_POINT* A_prime = EC_POINT_new(group);
     if (!A_prime || EC_POINT_mul(group, A_prime, s, Y, c, ctx) != 1) {
         EC_POINT_free(A_prime);
+        EC_POINT_free(M);
+        EC_POINT_free(composite_Z);
         BN_free(c);
         BN_free(s);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute A'"});
     }
 
-    // B' = s * R + c * Z
-    EC_POINT* sR = EC_POINT_new(group);
+    // B' = s * M + c * Z
+    EC_POINT* sM = EC_POINT_new(group);
     EC_POINT* cZ = EC_POINT_new(group);
     EC_POINT* B_prime = EC_POINT_new(group);
 
-    if (!sR || !cZ || !B_prime ||
-        EC_POINT_mul(group, sR, nullptr, R, s, ctx) != 1 ||
-        EC_POINT_mul(group, cZ, nullptr, Z, c, ctx) != 1 ||
-        EC_POINT_add(group, B_prime, sR, cZ, ctx) != 1) {
+    if (!sM || !cZ || !B_prime ||
+        EC_POINT_mul(group, sM, nullptr, M, s, ctx) != 1 ||
+        EC_POINT_mul(group, cZ, nullptr, composite_Z, c, ctx) != 1 ||
+        EC_POINT_add(group, B_prime, sM, cZ, ctx) != 1) {
         EC_POINT_free(A_prime);
-        EC_POINT_free(sR);
+        EC_POINT_free(sM);
         EC_POINT_free(cZ);
         EC_POINT_free(B_prime);
+        EC_POINT_free(M);
+        EC_POINT_free(composite_Z);
         BN_free(c);
         BN_free(s);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute B'"});
     }
 
-    // c' = H(G, Y, R, Z, A', B')
-    auto c_prime_result = compute_dleq_challenge(group, R, Z, Y, A_prime, ctx);
+    auto c_prime_result = compute_dleq_challenge(group, Y, M, composite_Z, A_prime, B_prime, ctx);
     if (!c_prime_result) {
         EC_POINT_free(A_prime);
-        EC_POINT_free(sR);
+        EC_POINT_free(sM);
         EC_POINT_free(cZ);
         EC_POINT_free(B_prime);
+        EC_POINT_free(M);
+        EC_POINT_free(composite_Z);
         BN_free(c);
         BN_free(s);
         return std::unexpected(c_prime_result.error());
@@ -683,9 +787,11 @@ Result<bool> verify_dleq_proof(
         ByteView(c_prime_bytes.data(), c_prime_bytes.size()));
 
     EC_POINT_free(A_prime);
-    EC_POINT_free(sR);
+    EC_POINT_free(sM);
     EC_POINT_free(cZ);
     EC_POINT_free(B_prime);
+    EC_POINT_free(M);
+    EC_POINT_free(composite_Z);
     BN_free(c);
     BN_free(s);
     BN_free(c_prime);
@@ -818,13 +924,8 @@ Result<std::pair<VoprfPrivateKey, VoprfPublicKey>> VoprfPrivateKey::generate() {
 }
 
 Result<VoprfPrivateKey> VoprfPrivateKey::from_bytes(ByteView data) {
-    if (data.empty()) {
-        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Empty private key data"});
-    }
-
-    // Validate input size to prevent integer truncation
-    if (data.size() > MAX_INPUT_SIZE) {
-        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Private key data too large"});
+    if (data.size() != P384_SCALAR_SIZE) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Invalid private key length"});
     }
 
     VoprfPrivateKey key;
@@ -833,6 +934,18 @@ Result<VoprfPrivateKey> VoprfPrivateKey::from_bytes(ByteView data) {
     if (!key.impl_->scalar) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Failed to parse private key"});
     }
+
+    BN_CTX* ctx = BN_CTX_new();
+    BIGNUM* order = BN_new();
+    if (!ctx || !order || EC_GROUP_get_order(key.impl_->group, order, ctx) != 1 ||
+        BN_is_zero(key.impl_->scalar) || BN_cmp(key.impl_->scalar, order) >= 0) {
+        BN_CTX_free(ctx);
+        BN_free(order);
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Invalid private key scalar"});
+    }
+
+    BN_CTX_free(ctx);
+    BN_free(order);
 
     return key;
 }
