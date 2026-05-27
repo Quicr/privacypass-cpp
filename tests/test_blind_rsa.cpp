@@ -188,4 +188,23 @@ TEST_SUITE("Blind RSA") {
             }
         }
     }
+
+    TEST_CASE("RFC 9474 Blind RSA PSS/SHA-384 vectors verify") {
+        const auto vectors = test_vectors::load_json("blindrsa_rfc9474_sha384_pss.json");
+
+        for (const auto& vector : vectors) {
+            CAPTURE(vector.at("name").get<std::string>());
+
+            auto public_key = BlindRsaPublicKey::from_components(
+                test_vectors::view(test_vectors::hex_field(vector, "n")),
+                test_vectors::view(test_vectors::hex_field(vector, "e")));
+            REQUIRE(public_key.has_value());
+
+            auto valid = public_key->verify(
+                test_vectors::view(test_vectors::hex_field(vector, "input_msg")),
+                test_vectors::view(test_vectors::hex_field(vector, "sig")));
+            REQUIRE(valid.has_value());
+            CHECK(*valid);
+        }
+    }
 }
