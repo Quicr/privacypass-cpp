@@ -29,7 +29,7 @@ function(privacy_pass_set_warnings target)
 endfunction()
 
 # Dependencies
-find_package(OpenSSL REQUIRED)
+find_package(OpenSSL 3.0 REQUIRED)
 
 include(FetchContent)
 
