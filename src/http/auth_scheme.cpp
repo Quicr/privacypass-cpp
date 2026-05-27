@@ -95,6 +95,44 @@ std::optional<std::pair<std::string, std::string>> parse_auth_param(std::string_
     return std::make_pair(std::move(key), std::move(value));
 }
 
+std::vector<std::string_view> split_private_token_challenges(std::string_view header) {
+    std::vector<std::string_view> challenges;
+    bool in_quote = false;
+    bool escaped = false;
+    size_t start = 0;
+
+    for (size_t i = 0; i < header.size(); ++i) {
+        const char c = header[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (in_quote && c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '"') {
+            in_quote = !in_quote;
+            continue;
+        }
+        if (in_quote || c != ',') {
+            continue;
+        }
+
+        size_t next = i + 1;
+        while (next < header.size() && (header[next] == ' ' || header[next] == '\t')) {
+            ++next;
+        }
+        if (header.substr(next).starts_with("PrivateToken ")) {
+            challenges.push_back(header.substr(start, i - start));
+            start = next;
+        }
+    }
+
+    challenges.push_back(header.substr(start));
+    return challenges;
+}
+
 }  // namespace
 
 // ChallengeHeader implementation
@@ -114,46 +152,63 @@ std::string ChallengeHeader::format() const {
 }
 
 Result<ChallengeHeader> ChallengeHeader::parse(std::string_view header) {
-    // Check for PrivateToken scheme
-    if (!header.starts_with("PrivateToken ")) {
-        return std::unexpected(Error{ErrorCode::INVALID_HEADER,
-            "Not a PrivateToken header"});
+    auto all = parse_all(header);
+    if (!all) {
+        return std::unexpected(all.error());
     }
+    if (all->empty()) {
+        return std::unexpected(Error{ErrorCode::INVALID_HEADER,
+            "No PrivateToken challenge"});
+    }
+    return std::move((*all)[0]);
+}
 
-    header.remove_prefix(13);  // "PrivateToken "
+Result<std::vector<ChallengeHeader>> ChallengeHeader::parse_all(std::string_view header) {
+    std::vector<ChallengeHeader> results;
 
-    ChallengeHeader result;
-
-    while (!header.empty()) {
-        auto param = parse_auth_param(header);
-        if (!param) {
-            break;
+    for (auto challenge : split_private_token_challenges(header)) {
+        if (!challenge.starts_with("PrivateToken ")) {
+            return std::unexpected(Error{ErrorCode::INVALID_HEADER,
+                "Not a PrivateToken header"});
         }
 
-        if (param->first == "challenge") {
-            result.challenge = std::move(param->second);
-        } else if (param->first == "token-key") {
-            result.token_key = std::move(param->second);
-        } else if (param->first == "max-age") {
-            try {
-                result.max_age = static_cast<uint32_t>(std::stoul(param->second));
-            } catch (...) {
-                // Ignore invalid max-age
+        challenge.remove_prefix(13);  // "PrivateToken "
+
+        ChallengeHeader result;
+
+        while (!challenge.empty()) {
+            auto param = parse_auth_param(challenge);
+            if (!param) {
+                break;
+            }
+
+            if (param->first == "challenge") {
+                result.challenge = std::move(param->second);
+            } else if (param->first == "token-key") {
+                result.token_key = std::move(param->second);
+            } else if (param->first == "max-age") {
+                try {
+                    result.max_age = static_cast<uint32_t>(std::stoul(param->second));
+                } catch (...) {
+                    // Ignore invalid max-age
+                }
             }
         }
+
+        if (result.challenge.empty()) {
+            return std::unexpected(Error{ErrorCode::MISSING_PARAMETER,
+                "Missing challenge parameter"});
+        }
+
+        if (result.token_key.empty()) {
+            return std::unexpected(Error{ErrorCode::MISSING_PARAMETER,
+                "Missing token-key parameter"});
+        }
+
+        results.push_back(std::move(result));
     }
 
-    if (result.challenge.empty()) {
-        return std::unexpected(Error{ErrorCode::MISSING_PARAMETER,
-            "Missing challenge parameter"});
-    }
-
-    if (result.token_key.empty()) {
-        return std::unexpected(Error{ErrorCode::MISSING_PARAMETER,
-            "Missing token-key parameter"});
-    }
-
-    return result;
+    return results;
 }
 
 Result<TokenChallenge> ChallengeHeader::decode_challenge() const {

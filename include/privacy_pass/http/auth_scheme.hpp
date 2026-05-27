@@ -9,6 +9,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace privacy_pass::http {
 
@@ -23,6 +24,9 @@ struct ChallengeHeader {
 
     // Parse from WWW-Authenticate header value
     [[nodiscard]] static Result<ChallengeHeader> parse(std::string_view header);
+
+    // Parse all PrivateToken challenges from a WWW-Authenticate header value
+    [[nodiscard]] static Result<std::vector<ChallengeHeader>> parse_all(std::string_view header);
 
     // Decode the challenge
     [[nodiscard]] Result<TokenChallenge> decode_challenge() const;
