@@ -661,24 +661,38 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
     int mod_size = BN_num_bytes(n_bn);
 
     BN_CTX* bn_ctx = BN_CTX_new();
+    BN_MONT_CTX* mont = BN_MONT_CTX_new();
     BIGNUM* m = BN_bin2bn(blinded_msg.data(), static_cast<int>(blinded_msg.size()), nullptr);
     BIGNUM* sig = BN_new();
 
-    if (!bn_ctx || !m || !sig) {
+    if (!bn_ctx || !mont || !m || !sig) {
         BN_free(n_bn);
         BN_free(d_bn);
         BN_free(m);
         BN_free(sig);
+        BN_MONT_CTX_free(mont);
         BN_CTX_free(bn_ctx);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to allocate bignums"});
     }
 
-    // sig = m^d mod n
-    if (!BN_mod_exp(sig, m, d_bn, n_bn, bn_ctx)) {
+    if (BN_MONT_CTX_set(mont, n_bn, bn_ctx) != 1) {
         BN_free(n_bn);
         BN_free(d_bn);
         BN_free(m);
         BN_free(sig);
+        BN_MONT_CTX_free(mont);
+        BN_CTX_free(bn_ctx);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create Montgomery context"});
+    }
+
+    // sig = m^d mod n
+    BN_set_flags(d_bn, BN_FLG_CONSTTIME);
+    if (BN_mod_exp_mont_consttime(sig, m, d_bn, n_bn, bn_ctx, mont) != 1) {
+        BN_free(n_bn);
+        BN_free(d_bn);
+        BN_free(m);
+        BN_free(sig);
+        BN_MONT_CTX_free(mont);
         BN_CTX_free(bn_ctx);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Blind sign failed"});
     }
@@ -690,6 +704,7 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
     BN_free(d_bn);
     BN_free(m);
     BN_free(sig);
+    BN_MONT_CTX_free(mont);
     BN_CTX_free(bn_ctx);
 
     return result;
