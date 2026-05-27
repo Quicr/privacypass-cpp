@@ -4,6 +4,8 @@
 #include <ostream>
 #include <privacy_pass/http/auth_scheme.hpp>
 
+#include "test_vector_utils.hpp"
+
 using namespace privacy_pass;
 using namespace privacy_pass::http;
 
@@ -173,5 +175,36 @@ TEST_SUITE("HTTP Auth Scheme") {
         CHECK(MEDIA_TYPE_ISSUER_DIRECTORY == "application/private-token-issuer-directory");
         CHECK(MEDIA_TYPE_TOKEN_REQUEST == "application/private-token-request");
         CHECK(MEDIA_TYPE_TOKEN_RESPONSE == "application/private-token-response");
+    }
+
+    TEST_CASE("RFC 9577 WWW-Authenticate vectors") {
+        const std::array files{
+            "auth_scheme_header_rfc9577.json",
+            "auth_scheme_header_complicated.json",
+        };
+
+        for (const auto* file : files) {
+            const auto vectors = test_vectors::load_json(file);
+            for (const auto& vector : vectors) {
+                CAPTURE(file);
+                CAPTURE(vector.dump());
+
+                auto parsed = ChallengeHeader::parse(vector.at("WWW-Authenticate").get<std::string>());
+                REQUIRE(parsed.has_value());
+
+                auto challenge = parsed->decode_challenge();
+                REQUIRE(challenge.has_value());
+                auto challenge_bytes = challenge->serialize();
+                REQUIRE(challenge_bytes.has_value());
+                CHECK(*challenge_bytes == test_vectors::hex_field(vector, "token-challenge-0"));
+
+                auto token_key = parsed->decode_token_key();
+                REQUIRE(token_key.has_value());
+                CHECK(*token_key == test_vectors::hex_field(vector, "token-key-0"));
+
+                REQUIRE(parsed->max_age.has_value());
+                CHECK(*parsed->max_age == vector.at("max-age-0").get<uint32_t>());
+            }
+        }
     }
 }

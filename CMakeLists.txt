@@ -58,6 +58,14 @@ if(PRIVACY_PASS_BUILD_TESTS)
         GIT_TAG v2.4.12
     )
     FetchContent_MakeAvailable(doctest)
+
+    set(JSON_BuildTests OFF CACHE INTERNAL "")
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.3
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
 # Fetch Google Benchmark if building benchmarks
@@ -244,6 +252,10 @@ if(PRIVACY_PASS_BUILD_TESTS)
     target_link_libraries(privacy_pass_tests PRIVATE
         privacy_pass
         doctest::doctest
+        nlohmann_json::nlohmann_json
+    )
+    target_compile_definitions(privacy_pass_tests PRIVATE
+        PRIVACY_PASS_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_data"
     )
     if(PRIVACY_PASS_BUILD_MOQ)
         target_link_libraries(privacy_pass_tests PRIVATE privacy_pass_moq)

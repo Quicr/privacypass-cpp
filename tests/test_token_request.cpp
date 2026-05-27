@@ -3,6 +3,8 @@
 #include <doctest/doctest.h>
 #include <privacy_pass/core/token_request.hpp>
 
+#include "test_vector_utils.hpp"
+
 using namespace privacy_pass;
 
 TEST_SUITE("TokenRequest") {
@@ -85,6 +87,31 @@ TEST_SUITE("TokenRequest") {
             std::vector<uint8_t> data = {0x00, 0x02};
             auto result = TokenRequest::deserialize(ByteView(data.data(), data.size()));
             CHECK(!result.has_value());
+        }
+    }
+
+    TEST_CASE("RFC 9578 token request vectors deserialize and serialize") {
+        const std::array files{
+            "pub_verif_rfc9578.go.json",
+            "pub_verif_rfc9578.rust.json",
+            "priv_verif_rfc9578.go.json",
+            "priv_verif_rfc9578.rust.json",
+        };
+
+        for (const auto* file : files) {
+            const auto vectors = test_vectors::load_json(file);
+            for (const auto& vector : vectors) {
+                CAPTURE(file);
+                CAPTURE(vector.dump());
+
+                const auto request_bytes = test_vectors::hex_field(vector, "token_request");
+                auto request = TokenRequest::deserialize(test_vectors::view(request_bytes));
+                REQUIRE(request.has_value());
+
+                auto serialized = request->serialize();
+                REQUIRE(serialized.has_value());
+                CHECK(*serialized == request_bytes);
+            }
         }
     }
 }

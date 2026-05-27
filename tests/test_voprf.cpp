@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 #include <doctest/doctest.h>
 #include <privacy_pass/crypto/voprf.hpp>
+#include <privacy_pass/core/token.hpp>
+
+#include "test_vector_utils.hpp"
 
 using namespace privacy_pass;
 using namespace privacy_pass::crypto;
@@ -205,6 +208,44 @@ TEST_SUITE("VOPRF") {
         SUBCASE("Empty private key") {
             auto result = VoprfPrivateKey::from_bytes(ByteView{});
             CHECK(!result.has_value());
+        }
+    }
+
+    TEST_CASE("RFC 9578 private-verifiable token vectors verify") {
+        const std::array files{
+            "priv_verif_rfc9578.go.json",
+            "priv_verif_rfc9578.rust.json",
+        };
+
+        for (const auto* file : files) {
+            const auto vectors = test_vectors::load_json(file);
+            for (const auto& vector : vectors) {
+                CAPTURE(file);
+                CAPTURE(vector.dump());
+
+                auto private_key = VoprfPrivateKey::from_bytes(
+                    test_vectors::view(test_vectors::hex_field(vector, "skS")));
+                REQUIRE(private_key.has_value());
+
+                auto public_key = private_key->public_key();
+                REQUIRE(public_key.has_value());
+                auto public_key_bytes = public_key->to_bytes();
+                REQUIRE(public_key_bytes.has_value());
+                CHECK(*public_key_bytes == test_vectors::hex_field(vector, "pkS"));
+
+                const auto token_bytes = test_vectors::hex_field(vector, "token");
+                auto token = Token::deserialize(test_vectors::view(token_bytes));
+                REQUIRE(token.has_value());
+
+                VoprfServer server(std::move(*private_key));
+                auto input = token->authenticator_input().serialize();
+                REQUIRE(input.has_value());
+                auto valid = server.verify_finalize(
+                    test_vectors::view(*input),
+                    test_vectors::view(token->authenticator));
+                REQUIRE(valid.has_value());
+                CHECK(*valid);
+            }
         }
     }
 }

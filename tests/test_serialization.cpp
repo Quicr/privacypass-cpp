@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 #include <doctest/doctest.h>
 #include <privacy_pass/core/serialization.hpp>
+#include <privacy_pass/core/token_response.hpp>
+
+#include "test_vector_utils.hpp"
 
 using namespace privacy_pass;
 
@@ -211,5 +214,36 @@ TEST_SUITE("Serialization") {
         CHECK(varint_size(16384) == 4);    // 0x4000
         CHECK(varint_size(0x3FFFFFFF) == 4);
         CHECK(varint_size(0x40000000) == 8);
+    }
+}
+
+TEST_SUITE("TokenResponse") {
+    TEST_CASE("RFC 9578 token response vectors deserialize and serialize") {
+        const std::array files{
+            "pub_verif_rfc9578.go.json",
+            "pub_verif_rfc9578.rust.json",
+            "priv_verif_rfc9578.go.json",
+            "priv_verif_rfc9578.rust.json",
+        };
+
+        for (const auto* file : files) {
+            const auto vectors = test_vectors::load_json(file);
+            for (const auto& vector : vectors) {
+                CAPTURE(file);
+                CAPTURE(vector.dump());
+
+                const auto challenge_bytes = test_vectors::hex_field(vector, "token_challenge");
+                const Bytes type_bytes{challenge_bytes[0], challenge_bytes[1]};
+                const auto type = test_vectors::token_type_from_bytes(type_bytes);
+                const auto response_bytes = test_vectors::hex_field(vector, "token_response");
+
+                auto response = TokenResponse::deserialize(type, test_vectors::view(response_bytes));
+                REQUIRE(response.has_value());
+
+                auto serialized = response->serialize();
+                REQUIRE(serialized.has_value());
+                CHECK(*serialized == response_bytes);
+            }
+        }
     }
 }

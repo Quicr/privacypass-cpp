@@ -2,8 +2,32 @@
 // SPDX-License-Identifier: BSD-2-Clause
 #include <doctest/doctest.h>
 #include <privacy_pass/core/token.hpp>
+#include <privacy_pass/core/token_challenge.hpp>
+
+#include "test_vector_utils.hpp"
+
+#include <optional>
 
 using namespace privacy_pass;
+
+namespace {
+
+std::vector<std::string> split_origins(const std::string& origin_info) {
+    std::vector<std::string> origins;
+    size_t offset = 0;
+    while (offset < origin_info.size()) {
+        const auto comma = origin_info.find(',', offset);
+        if (comma == std::string::npos) {
+            origins.push_back(origin_info.substr(offset));
+            break;
+        }
+        origins.push_back(origin_info.substr(offset, comma - offset));
+        offset = comma + 1;
+    }
+    return origins;
+}
+
+}  // namespace
 
 TEST_SUITE("Token") {
     TEST_CASE("Creation") {
@@ -182,6 +206,38 @@ TEST_SUITE("Token") {
             CHECK(!result.has_value());
         }
     }
+
+    TEST_CASE("RFC 9578 token vectors deserialize and serialize") {
+        const std::array files{
+            "pub_verif_rfc9578.go.json",
+            "pub_verif_rfc9578.rust.json",
+            "priv_verif_rfc9578.go.json",
+            "priv_verif_rfc9578.rust.json",
+        };
+
+        for (const auto* file : files) {
+            const auto vectors = test_vectors::load_json(file);
+            for (const auto& vector : vectors) {
+                CAPTURE(file);
+                CAPTURE(vector.dump());
+
+                const auto token_bytes = test_vectors::hex_field(vector, "token");
+                auto token = Token::deserialize(test_vectors::view(token_bytes));
+                REQUIRE(token.has_value());
+
+                auto serialized = token->serialize();
+                REQUIRE(serialized.has_value());
+                CHECK(*serialized == token_bytes);
+
+                const auto challenge_bytes = test_vectors::hex_field(vector, "token_challenge");
+                auto challenge = TokenChallenge::deserialize(test_vectors::view(challenge_bytes));
+                REQUIRE(challenge.has_value());
+                auto digest = challenge->digest();
+                REQUIRE(digest.has_value());
+                CHECK(token->challenge_digest == *digest);
+            }
+        }
+    }
 }
 
 TEST_SUITE("AuthenticatorInput") {
@@ -213,5 +269,45 @@ TEST_SUITE("AuthenticatorInput") {
     TEST_CASE("Serialized size") {
         AuthenticatorInput input{};
         CHECK(input.serialized_size() == 2 + 32 + 32 + 32);
+    }
+
+    TEST_CASE("RFC 9577 token authenticator input vectors") {
+        const auto vectors = test_vectors::load_json("auth_scheme_token_rfc9577.json");
+
+        for (const auto& vector : vectors) {
+            CAPTURE(vector.dump());
+
+            const auto type = test_vectors::token_type_from_bytes(
+                test_vectors::hex_field(vector, "token_type"));
+            const auto issuer = test_vectors::bytes_to_string(
+                test_vectors::hex_field(vector, "issuer_name"));
+            const auto redemption_context = test_vectors::hex_field(vector, "redemption_context");
+            const auto origin_info = test_vectors::bytes_to_string(
+                test_vectors::hex_field(vector, "origin_info"));
+
+            std::optional<ChallengeDigest> context;
+            if (!redemption_context.empty()) {
+                context = test_vectors::fixed_bytes<32>(redemption_context);
+            }
+
+            const auto challenge = TokenChallenge::create(
+                type,
+                issuer,
+                context,
+                split_origins(origin_info));
+            auto challenge_digest = challenge.digest();
+            REQUIRE(challenge_digest.has_value());
+
+            const AuthenticatorInput input{
+                .token_type = type,
+                .nonce = test_vectors::fixed_bytes<32>(test_vectors::hex_field(vector, "nonce")),
+                .challenge_digest = *challenge_digest,
+                .token_key_id = test_vectors::fixed_bytes<32>(test_vectors::hex_field(vector, "token_key_id")),
+            };
+
+            auto serialized = input.serialize();
+            REQUIRE(serialized.has_value());
+            CHECK(*serialized == test_vectors::hex_field(vector, "token_authenticator_input"));
+        }
     }
 }
