@@ -26,7 +26,7 @@ TEST_SUITE("Types") {
             auto info = TokenTypeInfo::for_type(TokenType::VOPRF_P384_SHA384);
             CHECK(info.authenticator_size == 48);
             CHECK(info.key_id_size == 32);
-            CHECK(info.blinded_element_size == 97);
+            CHECK(info.blinded_element_size == 49);
             CHECK(info.publicly_verifiable == false);
         }
     }

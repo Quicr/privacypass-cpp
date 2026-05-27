@@ -22,7 +22,7 @@ struct BlindRsaTokenResponse {
 
 // VOPRF token response (P-384)
 struct VoprfTokenResponse {
-    Bytes evaluate_msg;   // Ne = 97 bytes (compressed P-384 point)
+    Bytes evaluate_msg;   // Ne = 49 bytes (compressed P-384 point)
     Bytes evaluate_proof; // 2*Ns = 96 bytes (DLEQ proof)
 
     [[nodiscard]] Result<Bytes> serialize() const;

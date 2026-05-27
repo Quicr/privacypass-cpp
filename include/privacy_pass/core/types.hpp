@@ -100,7 +100,7 @@ struct TokenTypeInfo {
     static constexpr TokenTypeInfo for_type(TokenType t) noexcept {
         switch (t) {
             case TokenType::VOPRF_P384_SHA384:
-                return {t, 48, 32, 97, false};
+                return {t, 48, 32, 49, false};
             case TokenType::BLIND_RSA:
                 return {t, 256, 32, 256, true};
             case TokenType::VOPRF_RISTRETTO255_SHA512:

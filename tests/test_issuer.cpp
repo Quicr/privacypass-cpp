@@ -55,7 +55,7 @@ TEST_SUITE("PublicIssuer") {
         auto issuer = PublicIssuer::generate();
         REQUIRE(issuer.has_value());
 
-        Bytes blinded(97, 0x42);
+        Bytes blinded(49, 0x42);
         auto request = TokenRequest::create(
             TokenType::VOPRF_P384_SHA384,  // Wrong type
             issuer->truncated_key_id(),
@@ -133,7 +133,7 @@ TEST_SUITE("PrivateIssuer") {
         CHECK(response->token_type == TokenType::VOPRF_P384_SHA384);
         auto* voprf_resp = response->as_voprf();
         REQUIRE(voprf_resp != nullptr);
-        CHECK(voprf_resp->evaluate_msg.size() == 97);
+        CHECK(voprf_resp->evaluate_msg.size() == 49);
     }
 }
 

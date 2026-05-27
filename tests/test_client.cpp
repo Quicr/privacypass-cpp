@@ -47,7 +47,7 @@ TEST_SUITE("PrivateClient") {
 
         REQUIRE(result.has_value());
         CHECK(result->request.token_type == TokenType::VOPRF_P384_SHA384);
-        CHECK(result->request.blinded_msg.size() == 97);  // P-384 element
+        CHECK(result->request.blinded_msg.size() == 49);  // P-384 element
     }
 }
 
