@@ -45,6 +45,57 @@ bool is_rsa_pss_key(const EVP_PKEY* key) {
     return EVP_PKEY_base_id(key) == EVP_PKEY_RSA_PSS;
 }
 
+bool digest_name_is_sha384(std::string_view name) {
+    return name == "SHA384" || name == "SHA-384" || name == "SHA2-384";
+}
+
+Result<void> validate_rsa_pss_params(const EVP_PKEY* key) {
+    if (!is_rsa_pss_key(key)) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSASSA-PSS key"});
+    }
+
+    BIGNUM* n = nullptr;
+    BIGNUM* e = nullptr;
+    if (EVP_PKEY_get_bn_param(key, OSSL_PKEY_PARAM_RSA_N, &n) != 1 ||
+        EVP_PKEY_get_bn_param(key, OSSL_PKEY_PARAM_RSA_E, &e) != 1) {
+        BN_free(n);
+        BN_free(e);
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Missing RSA key parameters"});
+    }
+
+    const bool key_params_ok = BN_num_bits(n) == RSA_BITS && BN_is_word(e, RSA_PUBLIC_EXPONENT) == 1;
+    BN_free(n);
+    BN_free(e);
+    if (!key_params_ok) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY,
+            "RSASSA-PSS key must use RSA-2048 and exponent 65537"});
+    }
+
+    int salt_len = 0;
+    if (EVP_PKEY_get_int_param(key, OSSL_PKEY_PARAM_RSA_PSS_SALTLEN, &salt_len) != 1 ||
+        salt_len != SALT_LENGTH) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY,
+            "RSASSA-PSS key must use 48-byte salt"});
+    }
+
+    char digest[80]{};
+    char mgf1_digest[80]{};
+    size_t digest_len = 0;
+    size_t mgf1_digest_len = 0;
+    if (EVP_PKEY_get_utf8_string_param(
+            key, OSSL_PKEY_PARAM_RSA_DIGEST, digest, sizeof(digest), &digest_len) != 1 ||
+        EVP_PKEY_get_utf8_string_param(
+            key, OSSL_PKEY_PARAM_RSA_MGF1_DIGEST, mgf1_digest, sizeof(mgf1_digest),
+            &mgf1_digest_len) != 1 ||
+        !digest_name_is_sha384(std::string_view(digest, digest_len)) ||
+        !digest_name_is_sha384(std::string_view(mgf1_digest, mgf1_digest_len))) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY,
+            "RSASSA-PSS key must use SHA-384 and MGF1-SHA-384"});
+    }
+
+    return {};
+}
+
 // EMSA-PSS encoding for blind RSA (RFC 9474)
 Result<Bytes> emsa_pss_encode(EVP_PKEY* pkey, ByteView msg) {
     auto mHash = sha384(msg);
@@ -117,8 +168,9 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_spki(ByteView spki) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, get_sanitized_error()});
     }
 
-    if (!is_rsa_pss_key(key.impl_->pkey)) {
-        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSASSA-PSS key"});
+    auto params = validate_rsa_pss_params(key.impl_->pkey);
+    if (!params) {
+        return std::unexpected(params.error());
     }
 
     key.impl_->original_spki.assign(spki.begin(), spki.end());
@@ -153,6 +205,13 @@ Result<BlindRsaPublicKey> BlindRsaPublicKey::from_components(ByteView modulus, B
     OSSL_PARAM_BLD* bld = OSSL_PARAM_BLD_new();
     OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_N, n);
     OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_E, e);
+    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_RSA_DIGEST,
+        const_cast<char*>("SHA384"), 0);
+    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_RSA_MASKGENFUNC,
+        const_cast<char*>("MGF1"), 0);
+    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_RSA_MGF1_DIGEST,
+        const_cast<char*>("SHA384"), 0);
+    OSSL_PARAM_BLD_push_int(bld, OSSL_PKEY_PARAM_RSA_PSS_SALTLEN, SALT_LENGTH);
     OSSL_PARAM* params = OSSL_PARAM_BLD_to_param(bld);
 
     EVP_PKEY* pkey = nullptr;
@@ -553,7 +612,10 @@ Result<std::pair<BlindRsaPrivateKey, BlindRsaPublicKey>> BlindRsaPrivateKey::gen
     }
 
     bool success = EVP_PKEY_keygen_init(ctx) == 1 &&
-                   EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, RSA_BITS) == 1;
+                   EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, RSA_BITS) == 1 &&
+                   EVP_PKEY_CTX_set_rsa_pss_keygen_md(ctx, EVP_sha384()) == 1 &&
+                   EVP_PKEY_CTX_set_rsa_pss_keygen_mgf1_md(ctx, EVP_sha384()) == 1 &&
+                   EVP_PKEY_CTX_set_rsa_pss_keygen_saltlen(ctx, SALT_LENGTH) == 1;
 
     EVP_PKEY* pkey = nullptr;
     success = success && EVP_PKEY_keygen(ctx, &pkey) == 1;
@@ -592,8 +654,9 @@ Result<BlindRsaPrivateKey> BlindRsaPrivateKey::from_pkcs8(ByteView pkcs8) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, get_sanitized_error()});
     }
 
-    if (!is_rsa_pss_key(key.impl_->pkey)) {
-        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSASSA-PSS key"});
+    auto params = validate_rsa_pss_params(key.impl_->pkey);
+    if (!params) {
+        return std::unexpected(params.error());
     }
 
     return key;
