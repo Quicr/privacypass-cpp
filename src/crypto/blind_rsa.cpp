@@ -509,6 +509,13 @@ Result<Bytes> BlindRsaPublicKey::finalize(
     }
 
     int mod_size = BN_num_bytes(n_bn);
+    const auto expected_size = static_cast<size_t>(mod_size);
+
+    if (blind_sig.size() != expected_size || blinding_data.inverse.size() != expected_size) {
+        BN_free(n_bn);
+        return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
+            "Blind signature and inverse must match modulus length"});
+    }
 
     BN_CTX* bn_ctx = BN_CTX_new();
     if (!bn_ctx) {

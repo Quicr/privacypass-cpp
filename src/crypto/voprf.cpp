@@ -724,7 +724,7 @@ Result<bool> verify_dleq_proof(
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to parse proof"});
     }
 
-    // Validate scalars are in range [1, order-1]
+    // Validate scalars are in range [0, order-1]
     BIGNUM* order = BN_new();
     if (!order || EC_GROUP_get_order(group, order, ctx) != 1) {
         BN_free(c);
@@ -733,8 +733,7 @@ Result<bool> verify_dleq_proof(
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
     }
 
-    if (BN_is_zero(c) || BN_is_zero(s) ||
-        BN_cmp(c, order) >= 0 || BN_cmp(s, order) >= 0) {
+    if (BN_cmp(c, order) >= 0 || BN_cmp(s, order) >= 0) {
         BN_free(c);
         BN_free(s);
         BN_free(order);
@@ -845,6 +844,9 @@ VoprfPublicKey& VoprfPublicKey::operator=(VoprfPublicKey&&) noexcept = default;
 
 Result<VoprfPublicKey> VoprfPublicKey::from_bytes(ByteView data) {
     VoprfPublicKey key;
+    if (!key.impl_->group) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
+    }
 
     key.impl_->point = bytes_to_point(data, key.impl_->group);
     if (!key.impl_->point) {
@@ -857,6 +859,9 @@ Result<VoprfPublicKey> VoprfPublicKey::from_bytes(ByteView data) {
 Result<Bytes> VoprfPublicKey::to_bytes() const {
     if (!impl_->point) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Key not initialized"});
+    }
+    if (!impl_->group) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
 
     return point_to_bytes(impl_->point, impl_->group);
@@ -907,6 +912,9 @@ VoprfPrivateKey& VoprfPrivateKey::operator=(VoprfPrivateKey&&) noexcept = defaul
 
 Result<std::pair<VoprfPrivateKey, VoprfPublicKey>> VoprfPrivateKey::generate() {
     VoprfPrivateKey private_key;
+    if (!private_key.impl_->group) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
+    }
 
     BN_CTX* ctx = BN_CTX_new();
     if (!ctx) {
@@ -940,6 +948,12 @@ Result<std::pair<VoprfPrivateKey, VoprfPublicKey>> VoprfPrivateKey::generate() {
     }
 
     VoprfPublicKey public_key;
+    if (!public_key.impl_->group) {
+        EC_POINT_free(pub_point);
+        BN_free(order);
+        BN_CTX_free(ctx);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
+    }
     public_key.impl_->point = pub_point;
 
     BN_free(order);
@@ -954,6 +968,9 @@ Result<VoprfPrivateKey> VoprfPrivateKey::from_bytes(ByteView data) {
     }
 
     VoprfPrivateKey key;
+    if (!key.impl_->group) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
+    }
 
     key.impl_->scalar = BN_bin2bn(data.data(), static_cast<int>(data.size()), nullptr);
     if (!key.impl_->scalar) {
@@ -993,6 +1010,9 @@ Result<VoprfPublicKey> VoprfPrivateKey::public_key() const {
     if (!impl_->scalar) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Key not initialized"});
     }
+    if (!impl_->group) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
+    }
 
     BN_CTX* ctx = BN_CTX_new();
     if (!ctx) {
@@ -1010,6 +1030,10 @@ Result<VoprfPublicKey> VoprfPrivateKey::public_key() const {
     BN_CTX_free(ctx);
 
     VoprfPublicKey public_key;
+    if (!public_key.impl_->group) {
+        EC_POINT_free(pub_point);
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
+    }
     public_key.impl_->point = pub_point;
 
     return public_key;
