@@ -114,6 +114,46 @@ TEST_SUITE("Blind RSA") {
             REQUIRE(valid.has_value());
             CHECK(*valid == true);
         }
+
+        SUBCASE("Reject overlong blind signature") {
+            auto blinding = public_key.blind(msg);
+            REQUIRE(blinding.has_value());
+
+            auto blind_sig = private_key.blind_sign(
+                ByteView(blinding->blinded_msg.data(), blinding->blinded_msg.size()));
+            REQUIRE(blind_sig.has_value());
+
+            Bytes overlong_blind_sig;
+            overlong_blind_sig.reserve(blind_sig->size() + 1);
+            overlong_blind_sig.push_back(0);
+            overlong_blind_sig.insert(overlong_blind_sig.end(), blind_sig->begin(), blind_sig->end());
+
+            auto signature = public_key.finalize(
+                ByteView(overlong_blind_sig.data(), overlong_blind_sig.size()),
+                *blinding,
+                msg);
+            CHECK(!signature.has_value());
+        }
+
+        SUBCASE("Reject wrong-length blinding inverse") {
+            auto blinding = public_key.blind(msg);
+            REQUIRE(blinding.has_value());
+
+            auto blind_sig = private_key.blind_sign(
+                ByteView(blinding->blinded_msg.data(), blinding->blinded_msg.size()));
+            REQUIRE(blind_sig.has_value());
+
+            BlindingData bad_blinding;
+            bad_blinding.inverse = SecureBytes(blinding->inverse.view());
+            bad_blinding.inverse.resize(blinding->inverse.size() - 1);
+            bad_blinding.blinded_msg = blinding->blinded_msg;
+
+            auto signature = public_key.finalize(
+                ByteView(blind_sig->data(), blind_sig->size()),
+                bad_blinding,
+                msg);
+            CHECK(!signature.has_value());
+        }
     }
 
     TEST_CASE("Verification fails for wrong message") {
