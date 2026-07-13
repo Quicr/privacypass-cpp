@@ -3,10 +3,13 @@
 #include <privacy_pass/core/types.hpp>
 #include <privacy_pass/privacy_pass.hpp>
 
-#include <openssl/crypto.h>
-#include <openssl/err.h>
-#include <openssl/evp.h>
 #include <spdlog/spdlog.h>
+
+// Backend-specific init/shutdown are defined in src/crypto/{openssl,boringssl}/init.cpp
+namespace privacy_pass::crypto::detail {
+void backend_init();
+void backend_shutdown();
+}  // namespace privacy_pass::crypto::detail
 
 namespace privacy_pass {
 
@@ -19,8 +22,7 @@ Result<void> initialize() {
         return {};
     }
 
-    // Initialize OpenSSL
-    OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
+    crypto::detail::backend_init();
 
     g_initialized = true;
     spdlog::debug("Privacy Pass library initialized");
@@ -33,9 +35,7 @@ void shutdown() {
         return;
     }
 
-    // Clean up OpenSSL
-    EVP_cleanup();
-    ERR_free_strings();
+    crypto::detail::backend_shutdown();
 
     g_initialized = false;
     spdlog::debug("Privacy Pass library shut down");

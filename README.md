@@ -18,10 +18,12 @@ C++ implementation of the Privacy Pass protocol ([RFC9576](https://datatracker.i
 - Token challenges, requests, responses, and redemption
 - Optional MOQ extension ([draft-ietf-moq-privacy-pass-auth-02](https://datatracker.ietf.org/doc/html/draft-ietf-moq-privacy-pass-auth-02))
 - Modern C++23 with `std::expected` error handling
+- Pluggable crypto backend: OpenSSL 3.x or BoringSSL ([details](docs/crypto_backend.md))
 
 ## Building
 
-Requires CMake 3.20+, C++23 compiler, and OpenSSL 3.x.
+Requires CMake 3.20+, C++23 compiler, and OpenSSL (1.1 or 3.x) or BoringSSL.
+See [docs/crypto_backend.md](docs/crypto_backend.md) for multi-backend setup.
 
 ```bash
 cmake -B build
@@ -38,9 +40,18 @@ just moq=OFF build  # Build without MOQ extension
 ## Testing
 
 ```bash
-just test
-# or
-./build/privacy_pass_tests
+just test                # Test with system OpenSSL
+just test-openssl3       # Test with OpenSSL 3.x
+just test-openssl11      # Test with OpenSSL 1.1
+just test-boringssl      # Test with BoringSSL
+just test-all-crypto     # Test all three variants
+```
+
+Custom OpenSSL paths:
+
+```bash
+just test-openssl11 dir=/path/to/openssl-1.1
+just test-openssl3 dir=/path/to/openssl-3.0
 ```
 
 ## License

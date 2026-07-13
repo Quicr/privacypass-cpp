@@ -4,20 +4,16 @@
 #include <privacy_pass/crypto/hash.hpp>
 #include <privacy_pass/crypto/random.hpp>
 
-#include <openssl/bn.h>
-#include <openssl/crypto.h>
-#include <openssl/ec.h>
-#include <openssl/evp.h>
-#include <openssl/obj_mac.h>
+#include "compat.hpp"
 
-#include <spdlog/spdlog.h>
-#include <mutex>
+#include <openssl/obj_mac.h>
 
 namespace privacy_pass::crypto {
 
+using namespace detail;
+
 namespace {
 
-// Domain separation tags for OPRF v1, VOPRF mode, P-384/SHA-384.
 constexpr std::string_view CONTEXT_STRING = "OPRFV1-\x01-P384-SHA384";
 constexpr std::string_view DST_H2C = "HashToGroup-OPRFV1-\x01-P384-SHA384";
 constexpr std::string_view DST_H2S = "HashToScalar-OPRFV1-\x01-P384-SHA384";
@@ -26,7 +22,6 @@ constexpr std::string_view DST_COMPOSITE = "Composite";
 constexpr std::string_view DST_SEED_PREFIX = "Seed-";
 constexpr std::string_view DST_FINALIZE = "Finalize";
 
-// Maximum input size for OpenSSL APIs (prevent integer truncation)
 constexpr size_t MAX_INPUT_SIZE = static_cast<size_t>(INT_MAX);
 
 // Thread-safe P-384 curve group singleton
@@ -34,39 +29,26 @@ class P384Group {
 public:
     static EC_GROUP* get() {
         static P384Group instance;
-        if (!instance.group_) {
-            return nullptr;
-        }
         return instance.group_;
     }
-
-    ~P384Group() {
-        if (group_) {
-            EC_GROUP_free(group_);
-        }
-    }
-
 private:
     P384Group() {
         group_ = EC_GROUP_new_by_curve_name(NID_secp384r1);
     }
-
+    ~P384Group() {
+        if (group_) EC_GROUP_free(group_);
+    }
     P384Group(const P384Group&) = delete;
     P384Group& operator=(const P384Group&) = delete;
-
     EC_GROUP* group_ = nullptr;
 };
 
-// Get P-384 curve group (thread-safe)
 EC_GROUP* get_p384_group() {
     return P384Group::get();
 }
 
-// Constant-time comparison for cryptographic values
 bool constant_time_compare(ByteView a, ByteView b) {
-    if (a.size() != b.size()) {
-        return false;
-    }
+    if (a.size() != b.size()) return false;
     return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
 }
 
@@ -80,11 +62,14 @@ void append_u16_len_prefixed(Bytes& out, ByteView data) {
     out.insert(out.end(), data.begin(), data.end());
 }
 
+void append_string(Bytes& out, std::string_view value) {
+    out.insert(out.end(), value.begin(), value.end());
+}
+
 Result<Bytes> finalize_output(ByteView input, ByteView issued_element) {
     constexpr size_t MAX_U16 = 0xFFFF;
     if (input.size() > MAX_U16 || issued_element.size() > MAX_U16) {
-        return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
-            "VOPRF finalize input too large"});
+        return std::unexpected(Error{ErrorCode::INVALID_LENGTH, "VOPRF finalize input too large"});
     }
 
     Bytes hash_input;
@@ -94,78 +79,49 @@ Result<Bytes> finalize_output(ByteView input, ByteView issued_element) {
     hash_input.insert(hash_input.end(), DST_FINALIZE.begin(), DST_FINALIZE.end());
 
     auto output = sha384(ByteView(hash_input.data(), hash_input.size()));
-    if (!output) {
-        return std::unexpected(output.error());
-    }
-
+    if (!output) return std::unexpected(output.error());
     return Bytes(output->begin(), output->end());
 }
 
-// Serialize EC point to compressed form (per RFC 9497 SerializeElement)
 Result<Bytes> point_to_bytes(const EC_POINT* point, const EC_GROUP* group) {
-    BN_CTX* ctx = BN_CTX_new();
+    auto ctx = make_bn_ctx();
     if (!ctx) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create BN context"});
     }
-
-    size_t len = EC_POINT_point2oct(group, point, POINT_CONVERSION_COMPRESSED,
-        nullptr, 0, ctx);
-
+    size_t len = EC_POINT_point2oct(group, point, POINT_CONVERSION_COMPRESSED, nullptr, 0, ctx.get());
     if (len == 0) {
-        BN_CTX_free(ctx);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get point size"});
     }
-
     Bytes result(len);
-    if (EC_POINT_point2oct(group, point, POINT_CONVERSION_COMPRESSED,
-            result.data(), len, ctx) != len) {
-        BN_CTX_free(ctx);
+    if (EC_POINT_point2oct(group, point, POINT_CONVERSION_COMPRESSED, result.data(), len, ctx.get()) != len) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to serialize point"});
     }
-
-    BN_CTX_free(ctx);
     return result;
 }
 
-// Deserialize EC point with RFC 9497 P-384 validation.
-EC_POINT* bytes_to_point(ByteView data, const EC_GROUP* group) {
+UniqueEC_POINT bytes_to_point(ByteView data, const EC_GROUP* group) {
     if (data.size() != P384_ELEMENT_SIZE || (data[0] != 0x02 && data[0] != 0x03)) {
         return nullptr;
     }
+    auto ctx = make_bn_ctx();
+    if (!ctx) return nullptr;
 
-    BN_CTX* ctx = BN_CTX_new();
-    if (!ctx) {
+    auto point = make_ec_point(group);
+    if (!point) return nullptr;
+
+    if (EC_POINT_oct2point(group, point.get(), data.data(), data.size(), ctx.get()) != 1) {
         return nullptr;
     }
-
-    EC_POINT* point = EC_POINT_new(group);
-    if (!point) {
-        BN_CTX_free(ctx);
+    if (EC_POINT_is_on_curve(group, point.get(), ctx.get()) != 1 ||
+        EC_POINT_is_at_infinity(group, point.get()) == 1) {
         return nullptr;
     }
-
-    if (EC_POINT_oct2point(group, point, data.data(), data.size(), ctx) != 1) {
-        EC_POINT_free(point);
-        BN_CTX_free(ctx);
-        return nullptr;
-    }
-
-    // Validate point is on the curve and not the identity.
-    if (EC_POINT_is_on_curve(group, point, ctx) != 1 ||
-        EC_POINT_is_at_infinity(group, point) == 1) {
-        EC_POINT_free(point);
-        BN_CTX_free(ctx);
-        return nullptr;
-    }
-
-    BN_CTX_free(ctx);
     return point;
 }
 
-// Expand message using XMD (hash to arbitrary length) per RFC 9380 Section 5.3.1
 Result<Bytes> expand_message_xmd(ByteView msg, ByteView dst, size_t len_in_bytes) {
-    const size_t b_in_bytes = 48;  // SHA-384 output size
-    const size_t s_in_bytes = 128; // SHA-384 block size
+    const size_t b_in_bytes = 48;
+    const size_t s_in_bytes = 128;
 
     if (len_in_bytes > 255 * b_in_bytes || dst.size() > 255) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Invalid expand_message_xmd parameters"});
@@ -173,17 +129,12 @@ Result<Bytes> expand_message_xmd(ByteView msg, ByteView dst, size_t len_in_bytes
 
     size_t ell = (len_in_bytes + b_in_bytes - 1) / b_in_bytes;
 
-    // DST_prime = DST || I2OSP(len(DST), 1)
     Bytes dst_prime(dst.begin(), dst.end());
     dst_prime.push_back(static_cast<uint8_t>(dst.size()));
 
-    // Z_pad = I2OSP(0, s_in_bytes)
     Bytes z_pad(s_in_bytes, 0);
-
-    // l_i_b_str = I2OSP(len_in_bytes, 2)
     Bytes l_i_b_str = {static_cast<uint8_t>(len_in_bytes >> 8), static_cast<uint8_t>(len_in_bytes)};
 
-    // msg_prime = Z_pad || msg || l_i_b_str || I2OSP(0, 1) || DST_prime
     Bytes msg_prime;
     msg_prime.reserve(z_pad.size() + msg.size() + l_i_b_str.size() + 1 + dst_prime.size());
     msg_prime.insert(msg_prime.end(), z_pad.begin(), z_pad.end());
@@ -192,13 +143,9 @@ Result<Bytes> expand_message_xmd(ByteView msg, ByteView dst, size_t len_in_bytes
     msg_prime.push_back(0);
     msg_prime.insert(msg_prime.end(), dst_prime.begin(), dst_prime.end());
 
-    // b_0 = H(msg_prime)
     auto b_0 = sha384(ByteView(msg_prime.data(), msg_prime.size()));
-    if (!b_0) {
-        return std::unexpected(b_0.error());
-    }
+    if (!b_0) return std::unexpected(b_0.error());
 
-    // b_1 = H(b_0 || I2OSP(1, 1) || DST_prime)
     Bytes b_1_input;
     b_1_input.reserve(b_0->size() + 1 + dst_prime.size());
     b_1_input.insert(b_1_input.end(), b_0->begin(), b_0->end());
@@ -206,9 +153,7 @@ Result<Bytes> expand_message_xmd(ByteView msg, ByteView dst, size_t len_in_bytes
     b_1_input.insert(b_1_input.end(), dst_prime.begin(), dst_prime.end());
 
     auto b_1 = sha384(ByteView(b_1_input.data(), b_1_input.size()));
-    if (!b_1) {
-        return std::unexpected(b_1.error());
-    }
+    if (!b_1) return std::unexpected(b_1.error());
 
     Bytes uniform_bytes;
     uniform_bytes.reserve(len_in_bytes);
@@ -216,13 +161,11 @@ Result<Bytes> expand_message_xmd(ByteView msg, ByteView dst, size_t len_in_bytes
 
     Hash384 b_prev = *b_1;
     for (size_t i = 2; i <= ell; ++i) {
-        // strxor(b_0, b_(i-1))
         Hash384 xored;
         for (size_t j = 0; j < b_in_bytes; ++j) {
             xored[j] = (*b_0)[j] ^ b_prev[j];
         }
 
-        // b_i = H(strxor(b_0, b_(i-1)) || I2OSP(i, 1) || DST_prime)
         Bytes b_i_input;
         b_i_input.reserve(xored.size() + 1 + dst_prime.size());
         b_i_input.insert(b_i_input.end(), xored.begin(), xored.end());
@@ -230,9 +173,7 @@ Result<Bytes> expand_message_xmd(ByteView msg, ByteView dst, size_t len_in_bytes
         b_i_input.insert(b_i_input.end(), dst_prime.begin(), dst_prime.end());
 
         auto b_i = sha384(ByteView(b_i_input.data(), b_i_input.size()));
-        if (!b_i) {
-            return std::unexpected(b_i.error());
-        }
+        if (!b_i) return std::unexpected(b_i.error());
 
         uniform_bytes.insert(uniform_bytes.end(), b_i->begin(), b_i->end());
         b_prev = *b_i;
@@ -242,281 +183,166 @@ Result<Bytes> expand_message_xmd(ByteView msg, ByteView dst, size_t len_in_bytes
     return uniform_bytes;
 }
 
-// SSWU map for P-384 per RFC 9380 Appendix F.2
-Result<EC_POINT*> map_to_curve_sswu(const BIGNUM* u, const EC_GROUP* group, BN_CTX* ctx) {
-    // P-384 constants
-    // A = -3 (mod p)
-    // B = b4050a85 0c04b3ab f5413256 5044b0b7 d7bfd8ba 270b3943 2355ffb4
-    //     a9c7a8a9 acb4b9da 4db97dc6 e2b8a62a cb8dfe7b
-    // Z = -12 (mod p)
-    // c1 = (p - 3) / 4
-    // c2 = sqrt(-Z)
-
-    BIGNUM* p = BN_new();
-    BIGNUM* A = BN_new();
-    BIGNUM* B = BN_new();
-    BIGNUM* Z = BN_new();
-    BIGNUM* tv1 = BN_new();
-    BIGNUM* tv2 = BN_new();
-    BIGNUM* tv3 = BN_new();
-    BIGNUM* tv4 = BN_new();
-    BIGNUM* tv5 = BN_new();
-    BIGNUM* tv6 = BN_new();
-    BIGNUM* x = BN_new();
-    BIGNUM* y = BN_new();
-    BIGNUM* gx = BN_new();
-    BIGNUM* one = BN_new();
-    BIGNUM* neg_one = BN_new();
+Result<UniqueEC_POINT> map_to_curve_sswu(const BIGNUM* u, const EC_GROUP* group, BN_CTX* ctx) {
+    auto p = make_bignum();
+    auto A = make_bignum();
+    auto B = make_bignum();
+    auto Z = make_bignum();
+    auto tv1 = make_bignum();
+    auto tv2 = make_bignum();
+    auto tv3 = make_bignum();
+    auto tv4 = make_bignum();
+    auto tv5 = make_bignum();
+    auto tv6 = make_bignum();
+    auto x = make_bignum();
+    auto y = make_bignum();
+    auto gx = make_bignum();
+    auto one = make_bignum();
+    auto neg_one = make_bignum();
 
     if (!p || !A || !B || !Z || !tv1 || !tv2 || !tv3 || !tv4 || !tv5 || !tv6 ||
         !x || !y || !gx || !one || !neg_one) {
-        BN_free(p); BN_free(A); BN_free(B); BN_free(Z);
-        BN_free(tv1); BN_free(tv2); BN_free(tv3); BN_free(tv4); BN_free(tv5); BN_free(tv6);
-        BN_free(x); BN_free(y); BN_free(gx); BN_free(one); BN_free(neg_one);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to allocate bignums"});
     }
 
-    // Get curve parameters
-    EC_GROUP_get_curve(group, p, A, B, ctx);
-    BN_set_word(one, 1);
-    BN_sub(neg_one, p, one);
-    BN_set_word(Z, 12);
-    BN_sub(Z, p, Z);  // Z = -12 mod p
+    compat::ec_group_get_curve(group, p.get(), A.get(), B.get(), ctx);
+    BN_set_word(one.get(), 1);
+    BN_sub(neg_one.get(), p.get(), one.get());
+    BN_set_word(Z.get(), 12);
+    BN_sub(Z.get(), p.get(), Z.get());
 
-    // tv1 = u^2
-    BN_mod_sqr(tv1, u, p, ctx);
-    // tv3 = Z * tv1
-    BN_mod_mul(tv3, Z, tv1, p, ctx);
-    // tv5 = tv3^2
-    BN_mod_sqr(tv5, tv3, p, ctx);
-    // tv5 = tv5 + tv3
-    BN_mod_add(tv5, tv5, tv3, p, ctx);
-    // tv4 = tv5 + 1
-    BN_mod_add(tv4, tv5, one, p, ctx);
-    // tv4 = tv4 * B
-    BN_mod_mul(tv4, tv4, B, p, ctx);
-    // tv2 = tv3 * B
-    BN_mod_mul(tv2, tv3, B, p, ctx);
+    BN_mod_sqr(tv1.get(), u, p.get(), ctx);
+    BN_mod_mul(tv3.get(), Z.get(), tv1.get(), p.get(), ctx);
+    BN_mod_sqr(tv5.get(), tv3.get(), p.get(), ctx);
+    BN_mod_add(tv5.get(), tv5.get(), tv3.get(), p.get(), ctx);
+    BN_mod_add(tv4.get(), tv5.get(), one.get(), p.get(), ctx);
+    BN_mod_mul(tv4.get(), tv4.get(), B.get(), p.get(), ctx);
+    BN_mod_mul(tv2.get(), tv3.get(), B.get(), p.get(), ctx);
 
-    // Check if tv5 is zero (special case)
-    BIGNUM* temp = BN_new();
-    BN_copy(temp, tv5);
+    auto temp = make_bignum();
+    BN_copy(temp.get(), tv5.get());
 
-    // tv6 = -A (need to compute denominator)
-    BN_sub(tv6, p, A);
+    BN_sub(tv6.get(), p.get(), A.get());
 
-    if (BN_is_zero(temp)) {
-        // tv6 = Z * A
-        BN_mod_mul(tv6, Z, A, p, ctx);
+    if (BN_is_zero(temp.get())) {
+        BN_mod_mul(tv6.get(), Z.get(), A.get(), p.get(), ctx);
     } else {
-        // tv6 = tv5 * (-A)
-        BIGNUM* neg_A = BN_new();
-        BN_sub(neg_A, p, A);
-        BN_mod_mul(tv6, tv5, neg_A, p, ctx);
-        BN_free(neg_A);
+        auto neg_A = make_bignum();
+        BN_sub(neg_A.get(), p.get(), A.get());
+        BN_mod_mul(tv6.get(), tv5.get(), neg_A.get(), p.get(), ctx);
     }
-    BN_free(temp);
 
-    // x = tv4 / tv6 (using modular inverse)
-    BIGNUM* tv6_inv = BN_mod_inverse(nullptr, tv6, p, ctx);
+    auto tv6_inv = UniqueBIGNUM(BN_mod_inverse(nullptr, tv6.get(), p.get(), ctx));
     if (!tv6_inv) {
-        BN_free(p); BN_free(A); BN_free(B); BN_free(Z);
-        BN_free(tv1); BN_free(tv2); BN_free(tv3); BN_free(tv4); BN_free(tv5); BN_free(tv6);
-        BN_free(x); BN_free(y); BN_free(gx); BN_free(one); BN_free(neg_one);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute inverse"});
     }
-    BN_mod_mul(x, tv4, tv6_inv, p, ctx);
-    BN_free(tv6_inv);
+    BN_mod_mul(x.get(), tv4.get(), tv6_inv.get(), p.get(), ctx);
 
-    // gx = x^2
-    BN_mod_sqr(gx, x, p, ctx);
-    // gx = gx + A
-    BN_mod_add(gx, gx, A, p, ctx);
-    // gx = gx * x
-    BN_mod_mul(gx, gx, x, p, ctx);
-    // gx = gx + B
-    BN_mod_add(gx, gx, B, p, ctx);
+    BN_mod_sqr(gx.get(), x.get(), p.get(), ctx);
+    BN_mod_add(gx.get(), gx.get(), A.get(), p.get(), ctx);
+    BN_mod_mul(gx.get(), gx.get(), x.get(), p.get(), ctx);
+    BN_mod_add(gx.get(), gx.get(), B.get(), p.get(), ctx);
 
-    // y = sqrt(gx) using Tonelli-Shanks (for p = 3 mod 4, use y = gx^((p+1)/4))
-    BIGNUM* exp = BN_new();
-    BN_add(exp, p, one);
-    BN_rshift(exp, exp, 2);  // exp = (p+1)/4
-    BN_mod_exp(y, gx, exp, p, ctx);
-    BN_free(exp);
+    auto exp = make_bignum();
+    BN_add(exp.get(), p.get(), one.get());
+    BN_rshift(exp.get(), exp.get(), 2);
+    BN_mod_exp(y.get(), gx.get(), exp.get(), p.get(), ctx);
 
-    // Check if y^2 = gx using constant-time comparison
-    BIGNUM* y_sq = BN_new();
-    BN_mod_sqr(y_sq, y, p, ctx);
+    auto y_sq = make_bignum();
+    BN_mod_sqr(y_sq.get(), y.get(), p.get(), ctx);
 
-    // Serialize both for constant-time comparison
-    int p_bytes = BN_num_bytes(p);
+    int p_bytes = BN_num_bytes(p.get());
     Bytes y_sq_bytes(static_cast<size_t>(p_bytes));
     Bytes gx_bytes(static_cast<size_t>(p_bytes));
-    BN_bn2binpad(y_sq, y_sq_bytes.data(), p_bytes);
-    BN_bn2binpad(gx, gx_bytes.data(), p_bytes);
+    BN_bn2binpad(y_sq.get(), y_sq_bytes.data(), p_bytes);
+    BN_bn2binpad(gx.get(), gx_bytes.data(), p_bytes);
 
     bool is_square = constant_time_compare(
         ByteView(y_sq_bytes.data(), y_sq_bytes.size()),
         ByteView(gx_bytes.data(), gx_bytes.size()));
-    BN_free(y_sq);
 
     if (!is_square) {
-        // Use other branch: x = tv3 * x, y = sqrt(Z * u^3 * gx)
-        BN_mod_mul(x, tv3, x, p, ctx);
+        BN_mod_mul(x.get(), tv3.get(), x.get(), p.get(), ctx);
 
-        // Recompute gx for new x
-        BN_mod_sqr(gx, x, p, ctx);
-        BN_mod_add(gx, gx, A, p, ctx);
-        BN_mod_mul(gx, gx, x, p, ctx);
-        BN_mod_add(gx, gx, B, p, ctx);
+        BN_mod_sqr(gx.get(), x.get(), p.get(), ctx);
+        BN_mod_add(gx.get(), gx.get(), A.get(), p.get(), ctx);
+        BN_mod_mul(gx.get(), gx.get(), x.get(), p.get(), ctx);
+        BN_mod_add(gx.get(), gx.get(), B.get(), p.get(), ctx);
 
-        exp = BN_new();
-        BN_add(exp, p, one);
-        BN_rshift(exp, exp, 2);
-        BN_mod_exp(y, gx, exp, p, ctx);
-        BN_free(exp);
+        exp = make_bignum();
+        BN_add(exp.get(), p.get(), one.get());
+        BN_rshift(exp.get(), exp.get(), 2);
+        BN_mod_exp(y.get(), gx.get(), exp.get(), p.get(), ctx);
     }
 
-    // Ensure y has correct sign (CMOV based on sgn0)
-    // sgn0(u) = u mod 2
-    // sgn0(y) = y mod 2
     int sgn0_u = BN_is_odd(u);
-    int sgn0_y = BN_is_odd(y);
+    int sgn0_y = BN_is_odd(y.get());
     if (sgn0_u != sgn0_y) {
-        BN_sub(y, p, y);  // y = -y
+        BN_sub(y.get(), p.get(), y.get());
     }
 
-    // Create point
-    EC_POINT* point = EC_POINT_new(group);
-    if (!point || EC_POINT_set_affine_coordinates(group, point, x, y, ctx) != 1) {
-        EC_POINT_free(point);
-        BN_free(p); BN_free(A); BN_free(B); BN_free(Z);
-        BN_free(tv1); BN_free(tv2); BN_free(tv3); BN_free(tv4); BN_free(tv5); BN_free(tv6);
-        BN_free(x); BN_free(y); BN_free(gx); BN_free(one); BN_free(neg_one);
+    auto point = make_ec_point(group);
+    if (!point || EC_POINT_set_affine_coordinates(group, point.get(), x.get(), y.get(), ctx) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create point"});
     }
-
-    BN_free(p); BN_free(A); BN_free(B); BN_free(Z);
-    BN_free(tv1); BN_free(tv2); BN_free(tv3); BN_free(tv4); BN_free(tv5); BN_free(tv6);
-    BN_free(x); BN_free(y); BN_free(gx); BN_free(one); BN_free(neg_one);
-
     return point;
 }
 
-// Hash to curve using RFC 9380 compliant SSWU method
-Result<EC_POINT*> hash_to_curve(ByteView input, const EC_GROUP* group) {
+Result<UniqueEC_POINT> hash_to_curve(ByteView input, const EC_GROUP* group) {
     if (input.size() > MAX_INPUT_SIZE) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Input too large"});
     }
 
-    // Per RFC 9380 Section 5.2: hash_to_curve for P-384
-    // 1. u = hash_to_field(msg, 2)
-    // 2. Q0 = map_to_curve(u[0])
-    // 3. Q1 = map_to_curve(u[1])
-    // 4. R = Q0 + Q1
-    // 5. P = clear_cofactor(R)  -- cofactor is 1 for P-384
-
-    // Expand message to get 2 field elements (each 72 bytes for security margin)
-    size_t L = 72;  // ceil((ceil(log2(p)) + k) / 8) where k=128
+    size_t L = 72;
     auto expanded = expand_message_xmd(input, ByteView(
         reinterpret_cast<const uint8_t*>(DST_H2C.data()), DST_H2C.size()), 2 * L);
-    if (!expanded) {
-        return std::unexpected(expanded.error());
-    }
+    if (!expanded) return std::unexpected(expanded.error());
 
-    BN_CTX* ctx = BN_CTX_new();
+    auto ctx = make_bn_ctx();
     if (!ctx) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create context"});
     }
 
-    BIGNUM* p = BN_new();
-    EC_GROUP_get_curve(group, p, nullptr, nullptr, ctx);
+    auto p = make_bignum();
+    compat::ec_group_get_curve(group, p.get(), nullptr, nullptr, ctx.get());
 
-    // u[0] = OS2IP(expand[0:L]) mod p
-    BIGNUM* u0 = BN_bin2bn(expanded->data(), static_cast<int>(L), nullptr);
-    BN_mod(u0, u0, p, ctx);
+    auto u0 = bin2bn(expanded->data(), static_cast<int>(L));
+    BN_mod(u0.get(), u0.get(), p.get(), ctx.get());
 
-    // u[1] = OS2IP(expand[L:2L]) mod p
-    BIGNUM* u1 = BN_bin2bn(expanded->data() + L, static_cast<int>(L), nullptr);
-    BN_mod(u1, u1, p, ctx);
+    auto u1 = bin2bn(expanded->data() + L, static_cast<int>(L));
+    BN_mod(u1.get(), u1.get(), p.get(), ctx.get());
 
-    // Map to curve points
-    auto Q0_result = map_to_curve_sswu(u0, group, ctx);
-    if (!Q0_result) {
-        BN_free(u0);
-        BN_free(u1);
-        BN_free(p);
-        BN_CTX_free(ctx);
-        return std::unexpected(Q0_result.error());
-    }
-    EC_POINT* Q0 = *Q0_result;
+    auto Q0_result = map_to_curve_sswu(u0.get(), group, ctx.get());
+    if (!Q0_result) return std::unexpected(Q0_result.error());
 
-    auto Q1_result = map_to_curve_sswu(u1, group, ctx);
-    if (!Q1_result) {
-        EC_POINT_free(Q0);
-        BN_free(u0);
-        BN_free(u1);
-        BN_free(p);
-        BN_CTX_free(ctx);
-        return std::unexpected(Q1_result.error());
-    }
-    EC_POINT* Q1 = *Q1_result;
+    auto Q1_result = map_to_curve_sswu(u1.get(), group, ctx.get());
+    if (!Q1_result) return std::unexpected(Q1_result.error());
 
-    // R = Q0 + Q1
-    EC_POINT* R = EC_POINT_new(group);
-    if (!R || EC_POINT_add(group, R, Q0, Q1, ctx) != 1) {
-        EC_POINT_free(Q0);
-        EC_POINT_free(Q1);
-        EC_POINT_free(R);
-        BN_free(u0);
-        BN_free(u1);
-        BN_free(p);
-        BN_CTX_free(ctx);
+    auto R = make_ec_point(group);
+    if (!R || EC_POINT_add(group, R.get(), Q0_result->get(), Q1_result->get(), ctx.get()) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Point addition failed"});
     }
-
-    EC_POINT_free(Q0);
-    EC_POINT_free(Q1);
-    BN_free(u0);
-    BN_free(u1);
-    BN_free(p);
-    BN_CTX_free(ctx);
-
-    // P-384 has cofactor 1, so no cofactor clearing needed
     return R;
 }
 
-Result<BIGNUM*> hash_to_scalar(ByteView input, const EC_GROUP* group, BN_CTX* ctx) {
+Result<UniqueBIGNUM> hash_to_scalar(ByteView input, const EC_GROUP* group, BN_CTX* ctx) {
     constexpr size_t L = 72;
     auto uniform = expand_message_xmd(input,
         ByteView(reinterpret_cast<const uint8_t*>(DST_H2S.data()), DST_H2S.size()), L);
-    if (!uniform) {
-        return std::unexpected(uniform.error());
-    }
+    if (!uniform) return std::unexpected(uniform.error());
 
-    BIGNUM* order = BN_new();
-    BIGNUM* scalar = BN_bin2bn(uniform->data(), static_cast<int>(uniform->size()), nullptr);
-    if (!order || !scalar || EC_GROUP_get_order(group, order, ctx) != 1 ||
-        BN_mod(scalar, scalar, order, ctx) != 1) {
-        BN_free(order);
-        BN_free(scalar);
+    auto order = make_bignum();
+    auto scalar = bin2bn(uniform->data(), static_cast<int>(uniform->size()));
+    if (!order || !scalar || EC_GROUP_get_order(group, order.get(), ctx) != 1 ||
+        BN_mod(scalar.get(), scalar.get(), order.get(), ctx) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to hash to scalar"});
     }
-
-    BN_free(order);
     return scalar;
 }
 
-void append_string(Bytes& out, std::string_view value) {
-    out.insert(out.end(), value.begin(), value.end());
-}
-
-Result<BIGNUM*> compute_composite_scalar(
-    const EC_GROUP* group,
-    const EC_POINT* B,
-    const EC_POINT* C,
-    const EC_POINT* D,
-    BN_CTX* ctx) {
+Result<UniqueBIGNUM> compute_composite_scalar(
+    const EC_GROUP* group, const EC_POINT* B,
+    const EC_POINT* C, const EC_POINT* D, BN_CTX* ctx) {
 
     auto Bm = point_to_bytes(B, group);
     auto Ci = point_to_bytes(C, group);
@@ -534,9 +360,7 @@ Result<BIGNUM*> compute_composite_scalar(
     append_u16_len_prefixed(seed_transcript, ByteView(seed_dst.data(), seed_dst.size()));
 
     auto seed = sha384(ByteView(seed_transcript.data(), seed_transcript.size()));
-    if (!seed) {
-        return std::unexpected(seed.error());
-    }
+    if (!seed) return std::unexpected(seed.error());
 
     Bytes composite_transcript;
     append_u16_len_prefixed(composite_transcript, ByteView(seed->data(), seed->size()));
@@ -548,42 +372,27 @@ Result<BIGNUM*> compute_composite_scalar(
     return hash_to_scalar(ByteView(composite_transcript.data(), composite_transcript.size()), group, ctx);
 }
 
-Result<std::pair<EC_POINT*, EC_POINT*>> compute_composites(
-    const EC_GROUP* group,
-    const EC_POINT* B,
-    const EC_POINT* C,
-    const EC_POINT* D,
-    BN_CTX* ctx) {
+Result<std::pair<UniqueEC_POINT, UniqueEC_POINT>> compute_composites(
+    const EC_GROUP* group, const EC_POINT* B,
+    const EC_POINT* C, const EC_POINT* D, BN_CTX* ctx) {
 
     auto di_result = compute_composite_scalar(group, B, C, D, ctx);
-    if (!di_result) {
-        return std::unexpected(di_result.error());
-    }
-    BIGNUM* di = *di_result;
+    if (!di_result) return std::unexpected(di_result.error());
 
-    EC_POINT* M = EC_POINT_new(group);
-    EC_POINT* Z = EC_POINT_new(group);
+    auto M = make_ec_point(group);
+    auto Z = make_ec_point(group);
     if (!M || !Z ||
-        EC_POINT_mul(group, M, nullptr, C, di, ctx) != 1 ||
-        EC_POINT_mul(group, Z, nullptr, D, di, ctx) != 1) {
-        EC_POINT_free(M);
-        EC_POINT_free(Z);
-        BN_free(di);
+        EC_POINT_mul(group, M.get(), nullptr, C, di_result->get(), ctx) != 1 ||
+        EC_POINT_mul(group, Z.get(), nullptr, D, di_result->get(), ctx) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute composites"});
     }
-
-    BN_free(di);
-    return std::make_pair(M, Z);
+    return std::make_pair(std::move(M), std::move(Z));
 }
 
-Result<BIGNUM*> compute_dleq_challenge(
-    const EC_GROUP* group,
-    const EC_POINT* B,
-    const EC_POINT* M,
-    const EC_POINT* Z,
-    const EC_POINT* t2,
-    const EC_POINT* t3,
-    BN_CTX* ctx) {
+Result<UniqueBIGNUM> compute_dleq_challenge(
+    const EC_GROUP* group, const EC_POINT* B,
+    const EC_POINT* M, const EC_POINT* Z,
+    const EC_POINT* t2, const EC_POINT* t3, BN_CTX* ctx) {
 
     auto Bm = point_to_bytes(B, group);
     auto a0 = point_to_bytes(M, group);
@@ -605,236 +414,119 @@ Result<BIGNUM*> compute_dleq_challenge(
     return hash_to_scalar(ByteView(transcript.data(), transcript.size()), group, ctx);
 }
 
-// Generate DLEQ proof per RFC 9497
 Result<Bytes> generate_dleq_proof(
-    const EC_GROUP* group,
-    const BIGNUM* k,           // private key
-    const EC_POINT* Y,         // public key
-    const EC_POINT* R,         // blinded element
-    const EC_POINT* Z,         // evaluated element
-    BN_CTX* ctx) {
+    const EC_GROUP* group, const BIGNUM* k, const EC_POINT* Y,
+    const EC_POINT* R, const EC_POINT* Z, BN_CTX* ctx) {
 
-    BIGNUM* order = BN_new();
-    if (!order || EC_GROUP_get_order(group, order, ctx) != 1) {
-        BN_free(order);
+    auto order = make_bignum();
+    if (!order || EC_GROUP_get_order(group, order.get(), ctx) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
     }
 
     auto composites = compute_composites(group, Y, R, Z, ctx);
-    if (!composites) {
-        BN_free(order);
-        return std::unexpected(composites.error());
-    }
-    EC_POINT* M = composites->first;
-    EC_POINT* composite_Z = composites->second;
+    if (!composites) return std::unexpected(composites.error());
+    auto& [M, composite_Z] = *composites;
 
-    // Generate random scalar t
-    BIGNUM* t = BN_new();
-    if (!BN_rand_range(t, order) || BN_is_zero(t)) {
-        EC_POINT_free(M);
-        EC_POINT_free(composite_Z);
-        BN_free(order);
-        BN_free(t);
+    auto t = make_bignum();
+    if (!BN_rand_range(t.get(), order.get()) || BN_is_zero(t.get())) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to generate random scalar"});
     }
 
-    // A = t * G (G is the generator, implicit when first scalar is non-null)
-    EC_POINT* A = EC_POINT_new(group);
-    if (!A || EC_POINT_mul(group, A, t, nullptr, nullptr, ctx) != 1) {
-        EC_POINT_free(A);
-        EC_POINT_free(M);
-        EC_POINT_free(composite_Z);
-        BN_free(order);
-        BN_free(t);
+    auto A = make_ec_point(group);
+    if (!A || EC_POINT_mul(group, A.get(), t.get(), nullptr, nullptr, ctx) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute A"});
     }
 
-    // B = t * M
-    EC_POINT* B = EC_POINT_new(group);
-    if (!B || EC_POINT_mul(group, B, nullptr, M, t, ctx) != 1) {
-        EC_POINT_free(A);
-        EC_POINT_free(B);
-        EC_POINT_free(M);
-        EC_POINT_free(composite_Z);
-        BN_free(order);
-        BN_free(t);
+    auto B_pt = make_ec_point(group);
+    if (!B_pt || EC_POINT_mul(group, B_pt.get(), nullptr, M.get(), t.get(), ctx) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute B"});
     }
 
-    auto c_result = compute_dleq_challenge(group, Y, M, composite_Z, A, B, ctx);
-    if (!c_result) {
-        EC_POINT_free(A);
-        EC_POINT_free(B);
-        EC_POINT_free(M);
-        EC_POINT_free(composite_Z);
-        BN_free(order);
-        BN_free(t);
-        return std::unexpected(c_result.error());
-    }
-    BIGNUM* c = *c_result;
+    auto c_result = compute_dleq_challenge(group, Y, M.get(), composite_Z.get(), A.get(), B_pt.get(), ctx);
+    if (!c_result) return std::unexpected(c_result.error());
 
-    // s = t - c * k mod order
-    BIGNUM* s = BN_new();
-    BIGNUM* ck = BN_new();
-    BN_mod_mul(ck, c, k, order, ctx);
-    BN_mod_sub(s, t, ck, order, ctx);
+    auto s = make_bignum();
+    auto ck = make_bignum();
+    BN_mod_mul(ck.get(), c_result->get(), k, order.get(), ctx);
+    BN_mod_sub(s.get(), t.get(), ck.get(), order.get(), ctx);
 
-    // Proof = (c, s)
     Bytes proof(P384_PROOF_SIZE);
-    int c_len = BN_bn2binpad(c, proof.data(), P384_SCALAR_SIZE);
-    int s_len = BN_bn2binpad(s, proof.data() + P384_SCALAR_SIZE, P384_SCALAR_SIZE);
-
-    EC_POINT_free(A);
-    EC_POINT_free(B);
-    EC_POINT_free(M);
-    EC_POINT_free(composite_Z);
-    BN_free(order);
-    BN_free(t);
-    BN_free(c);
-    BN_free(s);
-    BN_free(ck);
+    int c_len = BN_bn2binpad(c_result->get(), proof.data(), P384_SCALAR_SIZE);
+    int s_len = BN_bn2binpad(s.get(), proof.data() + P384_SCALAR_SIZE, P384_SCALAR_SIZE);
 
     if (c_len != P384_SCALAR_SIZE || s_len != P384_SCALAR_SIZE) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to serialize proof"});
     }
-
     return proof;
 }
 
-// Verify DLEQ proof per RFC 9497
 Result<bool> verify_dleq_proof(
-    const EC_GROUP* group,
-    const EC_POINT* Y,        // public key
-    const EC_POINT* R,        // blinded element
-    const EC_POINT* Z,        // evaluated element
-    ByteView proof,
-    BN_CTX* ctx) {
+    const EC_GROUP* group, const EC_POINT* Y,
+    const EC_POINT* R, const EC_POINT* Z,
+    ByteView proof, BN_CTX* ctx) {
 
     if (proof.size() != P384_PROOF_SIZE) {
         return std::unexpected(Error{ErrorCode::VERIFICATION_FAILED, "Invalid proof size"});
     }
 
-    // Parse proof (c, s)
-    BIGNUM* c = BN_bin2bn(proof.data(), P384_SCALAR_SIZE, nullptr);
-    BIGNUM* s = BN_bin2bn(proof.data() + P384_SCALAR_SIZE, P384_SCALAR_SIZE, nullptr);
-
+    auto c = bin2bn(proof.data(), P384_SCALAR_SIZE);
+    auto s = bin2bn(proof.data() + P384_SCALAR_SIZE, P384_SCALAR_SIZE);
     if (!c || !s) {
-        BN_free(c);
-        BN_free(s);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to parse proof"});
     }
 
-    // Validate scalars are in range [0, order-1]
-    BIGNUM* order = BN_new();
-    if (!order || EC_GROUP_get_order(group, order, ctx) != 1) {
-        BN_free(c);
-        BN_free(s);
-        BN_free(order);
+    auto order = make_bignum();
+    if (!order || EC_GROUP_get_order(group, order.get(), ctx) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
     }
 
-    if (BN_cmp(c, order) >= 0 || BN_cmp(s, order) >= 0) {
-        BN_free(c);
-        BN_free(s);
-        BN_free(order);
+    if (BN_cmp(c.get(), order.get()) >= 0 || BN_cmp(s.get(), order.get()) >= 0) {
         return std::unexpected(Error{ErrorCode::VERIFICATION_FAILED, "Proof scalars out of range"});
     }
-    BN_free(order);
 
     auto composites = compute_composites(group, Y, R, Z, ctx);
-    if (!composites) {
-        BN_free(c);
-        BN_free(s);
-        return std::unexpected(composites.error());
-    }
-    EC_POINT* M = composites->first;
-    EC_POINT* composite_Z = composites->second;
+    if (!composites) return std::unexpected(composites.error());
+    auto& [M, composite_Z] = *composites;
 
-    // A' = s * G + c * Y (G is the generator, implicit in EC_POINT_mul with non-null first scalar)
-    EC_POINT* A_prime = EC_POINT_new(group);
-    if (!A_prime || EC_POINT_mul(group, A_prime, s, Y, c, ctx) != 1) {
-        EC_POINT_free(A_prime);
-        EC_POINT_free(M);
-        EC_POINT_free(composite_Z);
-        BN_free(c);
-        BN_free(s);
+    auto A_prime = make_ec_point(group);
+    if (!A_prime || EC_POINT_mul(group, A_prime.get(), s.get(), Y, c.get(), ctx) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute A'"});
     }
 
-    // B' = s * M + c * Z
-    EC_POINT* sM = EC_POINT_new(group);
-    EC_POINT* cZ = EC_POINT_new(group);
-    EC_POINT* B_prime = EC_POINT_new(group);
+    auto sM = make_ec_point(group);
+    auto cZ = make_ec_point(group);
+    auto B_prime = make_ec_point(group);
 
     if (!sM || !cZ || !B_prime ||
-        EC_POINT_mul(group, sM, nullptr, M, s, ctx) != 1 ||
-        EC_POINT_mul(group, cZ, nullptr, composite_Z, c, ctx) != 1 ||
-        EC_POINT_add(group, B_prime, sM, cZ, ctx) != 1) {
-        EC_POINT_free(A_prime);
-        EC_POINT_free(sM);
-        EC_POINT_free(cZ);
-        EC_POINT_free(B_prime);
-        EC_POINT_free(M);
-        EC_POINT_free(composite_Z);
-        BN_free(c);
-        BN_free(s);
+        EC_POINT_mul(group, sM.get(), nullptr, M.get(), s.get(), ctx) != 1 ||
+        EC_POINT_mul(group, cZ.get(), nullptr, composite_Z.get(), c.get(), ctx) != 1 ||
+        EC_POINT_add(group, B_prime.get(), sM.get(), cZ.get(), ctx) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute B'"});
     }
 
-    auto c_prime_result = compute_dleq_challenge(group, Y, M, composite_Z, A_prime, B_prime, ctx);
-    if (!c_prime_result) {
-        EC_POINT_free(A_prime);
-        EC_POINT_free(sM);
-        EC_POINT_free(cZ);
-        EC_POINT_free(B_prime);
-        EC_POINT_free(M);
-        EC_POINT_free(composite_Z);
-        BN_free(c);
-        BN_free(s);
-        return std::unexpected(c_prime_result.error());
-    }
-    BIGNUM* c_prime = *c_prime_result;
+    auto c_prime = compute_dleq_challenge(group, Y, M.get(), composite_Z.get(), A_prime.get(), B_prime.get(), ctx);
+    if (!c_prime) return std::unexpected(c_prime.error());
 
-    // Verify c == c' using constant-time comparison
-    // Serialize both to fixed-size byte arrays for constant-time comparison
     Bytes c_bytes(P384_SCALAR_SIZE);
     Bytes c_prime_bytes(P384_SCALAR_SIZE);
-    BN_bn2binpad(c, c_bytes.data(), P384_SCALAR_SIZE);
-    BN_bn2binpad(c_prime, c_prime_bytes.data(), P384_SCALAR_SIZE);
+    BN_bn2binpad(c.get(), c_bytes.data(), P384_SCALAR_SIZE);
+    BN_bn2binpad(c_prime->get(), c_prime_bytes.data(), P384_SCALAR_SIZE);
 
-    bool valid = constant_time_compare(
+    return constant_time_compare(
         ByteView(c_bytes.data(), c_bytes.size()),
         ByteView(c_prime_bytes.data(), c_prime_bytes.size()));
-
-    EC_POINT_free(A_prime);
-    EC_POINT_free(sM);
-    EC_POINT_free(cZ);
-    EC_POINT_free(B_prime);
-    EC_POINT_free(M);
-    EC_POINT_free(composite_Z);
-    BN_free(c);
-    BN_free(s);
-    BN_free(c_prime);
-
-    return valid;
 }
 
 }  // namespace
 
 // VoprfPublicKey implementation
 struct VoprfPublicKey::Impl {
-    EC_POINT* point = nullptr;
+    UniqueEC_POINT point;
     EC_GROUP* group = nullptr;
     TokenKeyId cached_key_id{};
     bool key_id_computed = false;
 
     Impl() : group(get_p384_group()) {}
-
-    ~Impl() {
-        if (point) {
-            EC_POINT_free(point);
-        }
-    }
 };
 
 VoprfPublicKey::VoprfPublicKey() : impl_(std::make_unique<Impl>()) {}
@@ -847,12 +539,10 @@ Result<VoprfPublicKey> VoprfPublicKey::from_bytes(ByteView data) {
     if (!key.impl_->group) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
-
     key.impl_->point = bytes_to_point(data, key.impl_->group);
     if (!key.impl_->point) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Failed to parse public key"});
     }
-
     return key;
 }
 
@@ -863,24 +553,17 @@ Result<Bytes> VoprfPublicKey::to_bytes() const {
     if (!impl_->group) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
-
-    return point_to_bytes(impl_->point, impl_->group);
+    return point_to_bytes(impl_->point.get(), impl_->group);
 }
 
 Result<TokenKeyId> VoprfPublicKey::key_id() const {
-    if (impl_->key_id_computed) {
-        return impl_->cached_key_id;
-    }
+    if (impl_->key_id_computed) return impl_->cached_key_id;
 
     auto bytes = to_bytes();
-    if (!bytes) {
-        return std::unexpected(bytes.error());
-    }
+    if (!bytes) return std::unexpected(bytes.error());
 
     auto hash = sha256(ByteView(bytes->data(), bytes->size()));
-    if (!hash) {
-        return std::unexpected(hash.error());
-    }
+    if (!hash) return std::unexpected(hash.error());
 
     impl_->cached_key_id = *hash;
     impl_->key_id_computed = true;
@@ -893,16 +576,10 @@ bool VoprfPublicKey::is_valid() const noexcept {
 
 // VoprfPrivateKey implementation
 struct VoprfPrivateKey::Impl {
-    BIGNUM* scalar = nullptr;
+    UniqueSecureBIGNUM scalar;
     EC_GROUP* group = nullptr;
 
     Impl() : group(get_p384_group()) {}
-
-    ~Impl() {
-        if (scalar) {
-            BN_clear_free(scalar);
-        }
-    }
 };
 
 VoprfPrivateKey::VoprfPrivateKey() : impl_(std::make_unique<Impl>()) {}
@@ -916,48 +593,30 @@ Result<std::pair<VoprfPrivateKey, VoprfPublicKey>> VoprfPrivateKey::generate() {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
 
-    BN_CTX* ctx = BN_CTX_new();
-    if (!ctx) {
-        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create context"});
-    }
-
-    BIGNUM* order = BN_new();
-    if (!order || EC_GROUP_get_order(private_key.impl_->group, order, ctx) != 1) {
-        BN_free(order);
-        BN_CTX_free(ctx);
+    auto ctx = make_bn_ctx();
+    auto order = make_bignum();
+    if (!ctx || !order || EC_GROUP_get_order(private_key.impl_->group, order.get(), ctx.get()) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
     }
 
-    private_key.impl_->scalar = BN_new();
-    if (!BN_rand_range(private_key.impl_->scalar, order) ||
-        BN_is_zero(private_key.impl_->scalar)) {
-        BN_free(order);
-        BN_CTX_free(ctx);
+    private_key.impl_->scalar = make_secure_bignum();
+    if (!BN_rand_range(private_key.impl_->scalar.get(), order.get()) ||
+        BN_is_zero(private_key.impl_->scalar.get())) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Key generation failed"});
     }
 
-    // Compute public key: Y = k * G
-    EC_POINT* pub_point = EC_POINT_new(private_key.impl_->group);
+    auto pub_point = make_ec_point(private_key.impl_->group);
     if (!pub_point ||
-        EC_POINT_mul(private_key.impl_->group, pub_point, private_key.impl_->scalar,
-            nullptr, nullptr, ctx) != 1) {
-        EC_POINT_free(pub_point);
-        BN_free(order);
-        BN_CTX_free(ctx);
+        EC_POINT_mul(private_key.impl_->group, pub_point.get(), private_key.impl_->scalar.get(),
+            nullptr, nullptr, ctx.get()) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Public key computation failed"});
     }
 
     VoprfPublicKey public_key;
     if (!public_key.impl_->group) {
-        EC_POINT_free(pub_point);
-        BN_free(order);
-        BN_CTX_free(ctx);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
-    public_key.impl_->point = pub_point;
-
-    BN_free(order);
-    BN_CTX_free(ctx);
+    public_key.impl_->point = std::move(pub_point);
 
     return std::make_pair(std::move(private_key), std::move(public_key));
 }
@@ -972,22 +631,17 @@ Result<VoprfPrivateKey> VoprfPrivateKey::from_bytes(ByteView data) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
 
-    key.impl_->scalar = BN_bin2bn(data.data(), static_cast<int>(data.size()), nullptr);
+    key.impl_->scalar = bin2bn_secure(data.data(), static_cast<int>(data.size()));
     if (!key.impl_->scalar) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Failed to parse private key"});
     }
 
-    BN_CTX* ctx = BN_CTX_new();
-    BIGNUM* order = BN_new();
-    if (!ctx || !order || EC_GROUP_get_order(key.impl_->group, order, ctx) != 1 ||
-        BN_is_zero(key.impl_->scalar) || BN_cmp(key.impl_->scalar, order) >= 0) {
-        BN_CTX_free(ctx);
-        BN_free(order);
+    auto ctx = make_bn_ctx();
+    auto order = make_bignum();
+    if (!ctx || !order || EC_GROUP_get_order(key.impl_->group, order.get(), ctx.get()) != 1 ||
+        BN_is_zero(key.impl_->scalar.get()) || BN_cmp(key.impl_->scalar.get(), order.get()) >= 0) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Invalid private key scalar"});
     }
-
-    BN_CTX_free(ctx);
-    BN_free(order);
 
     return key;
 }
@@ -996,13 +650,10 @@ Result<SecureBytes> VoprfPrivateKey::to_bytes() const {
     if (!impl_->scalar) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Key not initialized"});
     }
-
     SecureBytes result(P384_SCALAR_SIZE);
-    int len = BN_bn2binpad(impl_->scalar, result.data(), P384_SCALAR_SIZE);
-    if (len != P384_SCALAR_SIZE) {
+    if (BN_bn2binpad(impl_->scalar.get(), result.data(), P384_SCALAR_SIZE) != P384_SCALAR_SIZE) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to serialize private key"});
     }
-
     return result;
 }
 
@@ -1014,28 +665,18 @@ Result<VoprfPublicKey> VoprfPrivateKey::public_key() const {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
 
-    BN_CTX* ctx = BN_CTX_new();
-    if (!ctx) {
-        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create context"});
-    }
-
-    EC_POINT* pub_point = EC_POINT_new(impl_->group);
-    if (!pub_point ||
-        EC_POINT_mul(impl_->group, pub_point, impl_->scalar, nullptr, nullptr, ctx) != 1) {
-        EC_POINT_free(pub_point);
-        BN_CTX_free(ctx);
+    auto ctx = make_bn_ctx();
+    auto pub_point = make_ec_point(impl_->group);
+    if (!ctx || !pub_point ||
+        EC_POINT_mul(impl_->group, pub_point.get(), impl_->scalar.get(), nullptr, nullptr, ctx.get()) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Public key computation failed"});
     }
 
-    BN_CTX_free(ctx);
-
     VoprfPublicKey public_key;
     if (!public_key.impl_->group) {
-        EC_POINT_free(pub_point);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
-    public_key.impl_->point = pub_point;
-
+    public_key.impl_->point = std::move(pub_point);
     return public_key;
 }
 
@@ -1063,75 +704,33 @@ Result<VoprfFinalizationData> VoprfClient::blind(ByteView input) const {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
 
-    // Hash input to curve point
     auto h_result = hash_to_curve(input, group);
-    if (!h_result) {
-        return std::unexpected(h_result.error());
-    }
-    EC_POINT* P = *h_result;
+    if (!h_result) return std::unexpected(h_result.error());
 
-    BN_CTX* ctx = BN_CTX_new();
-    if (!ctx) {
-        EC_POINT_free(P);
-        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create context"});
-    }
-
-    // Generate random blinding scalar r
-    BIGNUM* order = BN_new();
-    if (!order || EC_GROUP_get_order(group, order, ctx) != 1) {
-        BN_free(order);
-        BN_CTX_free(ctx);
-        EC_POINT_free(P);
+    auto ctx = make_bn_ctx();
+    auto order = make_bignum();
+    if (!ctx || !order || EC_GROUP_get_order(group, order.get(), ctx.get()) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
     }
 
-    BIGNUM* r = BN_new();
-    if (!BN_rand_range(r, order) || BN_is_zero(r)) {
-        BN_free(r);
-        BN_free(order);
-        BN_CTX_free(ctx);
-        EC_POINT_free(P);
+    auto r = make_secure_bignum();
+    if (!BN_rand_range(r.get(), order.get()) || BN_is_zero(r.get())) {
         return std::unexpected(Error{ErrorCode::BLINDING_FAILED, "Failed to generate blinding scalar"});
     }
 
-    // Compute blinded element: R = r * P
-    EC_POINT* R = EC_POINT_new(group);
-    if (!R || EC_POINT_mul(group, R, nullptr, P, r, ctx) != 1) {
-        EC_POINT_free(R);
-        BN_free(r);
-        BN_free(order);
-        BN_CTX_free(ctx);
-        EC_POINT_free(P);
+    auto R = make_ec_point(group);
+    if (!R || EC_POINT_mul(group, R.get(), nullptr, h_result->get(), r.get(), ctx.get()) != 1) {
         return std::unexpected(Error{ErrorCode::BLINDING_FAILED, "Failed to compute blinded element"});
     }
 
-    // Serialize results
     VoprfFinalizationData result;
-
-    // Store blinding scalar
     result.blind_scalar.resize(P384_SCALAR_SIZE);
-    BN_bn2binpad(r, result.blind_scalar.data(), P384_SCALAR_SIZE);
+    BN_bn2binpad(r.get(), result.blind_scalar.data(), P384_SCALAR_SIZE);
 
-    // Store blinded element
-    auto blinded_bytes = point_to_bytes(R, group);
-    if (!blinded_bytes) {
-        EC_POINT_free(R);
-        BN_free(r);
-        BN_free(order);
-        BN_CTX_free(ctx);
-        EC_POINT_free(P);
-        return std::unexpected(blinded_bytes.error());
-    }
+    auto blinded_bytes = point_to_bytes(R.get(), group);
+    if (!blinded_bytes) return std::unexpected(blinded_bytes.error());
     result.blinded_element = std::move(*blinded_bytes);
-
-    // Store input for finalization
     result.input.assign(input.begin(), input.end());
-
-    EC_POINT_free(R);
-    EC_POINT_free(P);
-    BN_free(r);
-    BN_free(order);
-    BN_CTX_free(ctx);
 
     return result;
 }
@@ -1145,7 +744,6 @@ Result<Bytes> VoprfClient::finalize(
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
 
-    // Validate input sizes
     if (evaluation.evaluated_element.size() > MAX_INPUT_SIZE ||
         evaluation.proof.size() != P384_PROOF_SIZE ||
         finalization_data.blind_scalar.size() > MAX_INPUT_SIZE ||
@@ -1153,121 +751,60 @@ Result<Bytes> VoprfClient::finalize(
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Invalid input sizes"});
     }
 
-    // Deserialize evaluated element
-    EC_POINT* Z = bytes_to_point(
-        ByteView(evaluation.evaluated_element.data(), evaluation.evaluated_element.size()),
-        group);
+    auto Z = bytes_to_point(
+        ByteView(evaluation.evaluated_element.data(), evaluation.evaluated_element.size()), group);
     if (!Z) {
         return std::unexpected(Error{ErrorCode::UNBLINDING_FAILED, "Invalid evaluated element"});
     }
 
-    // Deserialize blinded element (R) for DLEQ verification
-    EC_POINT* R = bytes_to_point(
-        ByteView(finalization_data.blinded_element.data(), finalization_data.blinded_element.size()),
-        group);
+    auto R = bytes_to_point(
+        ByteView(finalization_data.blinded_element.data(), finalization_data.blinded_element.size()), group);
     if (!R) {
-        EC_POINT_free(Z);
         return std::unexpected(Error{ErrorCode::UNBLINDING_FAILED, "Invalid blinded element"});
     }
 
-    BN_CTX* ctx = BN_CTX_new();
+    auto ctx = make_bn_ctx();
     if (!ctx) {
-        EC_POINT_free(Z);
-        EC_POINT_free(R);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create context"});
     }
 
-    // Get public key for DLEQ verification
     auto pub_bytes = impl_->public_key.to_bytes();
-    if (!pub_bytes) {
-        BN_CTX_free(ctx);
-        EC_POINT_free(Z);
-        EC_POINT_free(R);
-        return std::unexpected(pub_bytes.error());
-    }
+    if (!pub_bytes) return std::unexpected(pub_bytes.error());
 
-    EC_POINT* Y = bytes_to_point(ByteView(pub_bytes->data(), pub_bytes->size()), group);
+    auto Y = bytes_to_point(ByteView(pub_bytes->data(), pub_bytes->size()), group);
     if (!Y) {
-        BN_CTX_free(ctx);
-        EC_POINT_free(Z);
-        EC_POINT_free(R);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to parse public key"});
     }
 
-    // Verify DLEQ proof before accepting the evaluation
     auto verify_result = verify_dleq_proof(
-        group, Y, R, Z,
-        ByteView(evaluation.proof.data(), evaluation.proof.size()),
-        ctx);
-
-    if (!verify_result) {
-        EC_POINT_free(Y);
-        EC_POINT_free(R);
-        EC_POINT_free(Z);
-        BN_CTX_free(ctx);
-        return std::unexpected(verify_result.error());
-    }
-
+        group, Y.get(), R.get(), Z.get(),
+        ByteView(evaluation.proof.data(), evaluation.proof.size()), ctx.get());
+    if (!verify_result) return std::unexpected(verify_result.error());
     if (!*verify_result) {
-        EC_POINT_free(Y);
-        EC_POINT_free(R);
-        EC_POINT_free(Z);
-        BN_CTX_free(ctx);
         return std::unexpected(Error{ErrorCode::VERIFICATION_FAILED,
             "DLEQ proof verification failed - evaluation may be malicious"});
     }
 
-    EC_POINT_free(Y);
-    EC_POINT_free(R);
+    auto r = bin2bn_secure(finalization_data.blind_scalar.data(),
+        static_cast<int>(finalization_data.blind_scalar.size()));
 
-    // Recover blinding scalar
-    BIGNUM* r = BN_bin2bn(finalization_data.blind_scalar.data(),
-        static_cast<int>(finalization_data.blind_scalar.size()), nullptr);
-
-    // Compute r^-1
-    BIGNUM* order = BN_new();
-    if (!order || EC_GROUP_get_order(group, order, ctx) != 1) {
-        BN_clear_free(r);
-        BN_free(order);
-        BN_CTX_free(ctx);
-        EC_POINT_free(Z);
+    auto order = make_bignum();
+    if (!order || EC_GROUP_get_order(group, order.get(), ctx.get()) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get group order"});
     }
 
-    BIGNUM* r_inv = BN_mod_inverse(nullptr, r, order, ctx);
+    auto r_inv = UniqueBIGNUM(BN_mod_inverse(nullptr, r.get(), order.get(), ctx.get()));
     if (!r_inv) {
-        BN_clear_free(r);
-        BN_free(order);
-        BN_CTX_free(ctx);
-        EC_POINT_free(Z);
         return std::unexpected(Error{ErrorCode::UNBLINDING_FAILED, "Failed to compute inverse"});
     }
 
-    // Compute unblinded result: N = r^-1 * Z
-    EC_POINT* N = EC_POINT_new(group);
-    if (!N || EC_POINT_mul(group, N, nullptr, Z, r_inv, ctx) != 1) {
-        EC_POINT_free(N);
-        BN_free(r_inv);
-        BN_clear_free(r);
-        BN_free(order);
-        BN_CTX_free(ctx);
-        EC_POINT_free(Z);
+    auto N = make_ec_point(group);
+    if (!N || EC_POINT_mul(group, N.get(), nullptr, Z.get(), r_inv.get(), ctx.get()) != 1) {
         return std::unexpected(Error{ErrorCode::UNBLINDING_FAILED, "Failed to unblind"});
     }
 
-    // Serialize output point
-    auto output_point = point_to_bytes(N, group);
-
-    EC_POINT_free(N);
-    EC_POINT_free(Z);
-    BN_free(r_inv);
-    BN_clear_free(r);
-    BN_free(order);
-    BN_CTX_free(ctx);
-
-    if (!output_point) {
-        return std::unexpected(output_point.error());
-    }
+    auto output_point = point_to_bytes(N.get(), group);
+    if (!output_point) return std::unexpected(output_point.error());
 
     return finalize_output(
         ByteView(finalization_data.input.data(), finalization_data.input.size()),
@@ -1293,114 +830,52 @@ Result<VoprfEvaluation> VoprfServer::blind_evaluate(ByteView blinded_element) co
     if (!group) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
-
-    // Validate input size
     if (blinded_element.size() > MAX_INPUT_SIZE) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Blinded element too large"});
     }
 
-    // Deserialize blinded element
-    EC_POINT* R = bytes_to_point(blinded_element, group);
+    auto R = bytes_to_point(blinded_element, group);
     if (!R) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Invalid blinded element"});
     }
 
-    BN_CTX* ctx = BN_CTX_new();
+    auto ctx = make_bn_ctx();
     if (!ctx) {
-        EC_POINT_free(R);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create context"});
     }
 
-    // Get private scalar
     auto scalar_bytes = impl_->private_key.to_bytes();
-    if (!scalar_bytes) {
-        BN_CTX_free(ctx);
-        EC_POINT_free(R);
-        return std::unexpected(scalar_bytes.error());
-    }
+    if (!scalar_bytes) return std::unexpected(scalar_bytes.error());
 
-    if (scalar_bytes->size() > MAX_INPUT_SIZE) {
-        BN_CTX_free(ctx);
-        EC_POINT_free(R);
-        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Scalar too large"});
-    }
+    auto k = bin2bn_secure(scalar_bytes->data(), static_cast<int>(scalar_bytes->size()));
 
-    BIGNUM* k = BN_bin2bn(scalar_bytes->data(),
-        static_cast<int>(scalar_bytes->size()), nullptr);
-
-    // Compute Z = k * R
-    EC_POINT* Z = EC_POINT_new(group);
-    if (!Z || EC_POINT_mul(group, Z, nullptr, R, k, ctx) != 1) {
-        EC_POINT_free(Z);
-        BN_clear_free(k);
-        BN_CTX_free(ctx);
-        EC_POINT_free(R);
+    auto Z = make_ec_point(group);
+    if (!Z || EC_POINT_mul(group, Z.get(), nullptr, R.get(), k.get(), ctx.get()) != 1) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Evaluation failed"});
     }
 
-    // Get public key for DLEQ proof
     auto pub_key_result = impl_->private_key.public_key();
-    if (!pub_key_result) {
-        EC_POINT_free(Z);
-        EC_POINT_free(R);
-        BN_clear_free(k);
-        BN_CTX_free(ctx);
-        return std::unexpected(pub_key_result.error());
-    }
+    if (!pub_key_result) return std::unexpected(pub_key_result.error());
 
     auto pub_bytes = pub_key_result->to_bytes();
-    if (!pub_bytes) {
-        EC_POINT_free(Z);
-        EC_POINT_free(R);
-        BN_clear_free(k);
-        BN_CTX_free(ctx);
-        return std::unexpected(pub_bytes.error());
-    }
+    if (!pub_bytes) return std::unexpected(pub_bytes.error());
 
-    EC_POINT* Y = bytes_to_point(ByteView(pub_bytes->data(), pub_bytes->size()), group);
+    auto Y = bytes_to_point(ByteView(pub_bytes->data(), pub_bytes->size()), group);
     if (!Y) {
-        EC_POINT_free(Z);
-        EC_POINT_free(R);
-        BN_clear_free(k);
-        BN_CTX_free(ctx);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get public key point"});
     }
 
-    // Generate DLEQ proof per RFC 9497
-    auto proof_result = generate_dleq_proof(group, k, Y, R, Z, ctx);
-    if (!proof_result) {
-        EC_POINT_free(Y);
-        EC_POINT_free(Z);
-        EC_POINT_free(R);
-        BN_clear_free(k);
-        BN_CTX_free(ctx);
-        return std::unexpected(proof_result.error());
-    }
+    auto proof_result = generate_dleq_proof(group, k.get(), Y.get(), R.get(), Z.get(), ctx.get());
+    if (!proof_result) return std::unexpected(proof_result.error());
 
-    // Serialize evaluated element
-    auto z_bytes = point_to_bytes(Z, group);
-    if (!z_bytes) {
-        EC_POINT_free(Y);
-        EC_POINT_free(Z);
-        BN_clear_free(k);
-        BN_CTX_free(ctx);
-        EC_POINT_free(R);
-        return std::unexpected(z_bytes.error());
-    }
+    auto z_bytes = point_to_bytes(Z.get(), group);
+    if (!z_bytes) return std::unexpected(z_bytes.error());
 
     VoprfEvaluation result;
     result.evaluated_element = std::move(*z_bytes);
     result.proof = std::move(*proof_result);
 
-    // Clear sensitive data
     scalar_bytes->clear();
-
-    EC_POINT_free(Y);
-    EC_POINT_free(Z);
-    EC_POINT_free(R);
-    BN_clear_free(k);
-    BN_CTX_free(ctx);
-
     return result;
 }
 
@@ -1409,77 +884,37 @@ Result<bool> VoprfServer::verify_finalize(ByteView input, ByteView output) const
     if (!group) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to get curve group"});
     }
-
-    // Validate input sizes
     if (input.size() > MAX_INPUT_SIZE) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Input too large"});
     }
 
-    // Hash input to curve
     auto h_result = hash_to_curve(input, group);
-    if (!h_result) {
-        return std::unexpected(h_result.error());
-    }
-    EC_POINT* P = *h_result;
+    if (!h_result) return std::unexpected(h_result.error());
 
-    BN_CTX* ctx = BN_CTX_new();
+    auto ctx = make_bn_ctx();
     if (!ctx) {
-        EC_POINT_free(P);
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to create context"});
     }
 
-    // Get private scalar
     auto scalar_bytes = impl_->private_key.to_bytes();
-    if (!scalar_bytes) {
-        BN_CTX_free(ctx);
-        EC_POINT_free(P);
-        return std::unexpected(scalar_bytes.error());
-    }
+    if (!scalar_bytes) return std::unexpected(scalar_bytes.error());
 
-    if (scalar_bytes->size() > MAX_INPUT_SIZE) {
-        BN_CTX_free(ctx);
-        EC_POINT_free(P);
-        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Scalar too large"});
-    }
+    auto k = bin2bn_secure(scalar_bytes->data(), static_cast<int>(scalar_bytes->size()));
 
-    BIGNUM* k = BN_bin2bn(scalar_bytes->data(),
-        static_cast<int>(scalar_bytes->size()), nullptr);
-
-    // Compute expected output: k * P
-    EC_POINT* expected = EC_POINT_new(group);
-    if (!expected || EC_POINT_mul(group, expected, nullptr, P, k, ctx) != 1) {
-        EC_POINT_free(expected);
-        BN_clear_free(k);
-        BN_CTX_free(ctx);
-        EC_POINT_free(P);
+    auto expected = make_ec_point(group);
+    if (!expected || EC_POINT_mul(group, expected.get(), nullptr, h_result->get(), k.get(), ctx.get()) != 1) {
         return std::unexpected(Error{ErrorCode::VERIFICATION_FAILED, "Failed to compute expected output"});
     }
 
-    // Hash expected point
-    auto expected_bytes = point_to_bytes(expected, group);
-    if (!expected_bytes) {
-        EC_POINT_free(expected);
-        BN_clear_free(k);
-        BN_CTX_free(ctx);
-        EC_POINT_free(P);
-        return std::unexpected(expected_bytes.error());
-    }
+    auto expected_bytes = point_to_bytes(expected.get(), group);
+    if (!expected_bytes) return std::unexpected(expected_bytes.error());
 
     auto expected_hash = finalize_output(input, ByteView(expected_bytes->data(), expected_bytes->size()));
 
-    // Clear sensitive data
     scalar_bytes->clear();
 
-    EC_POINT_free(expected);
-    EC_POINT_free(P);
-    BN_clear_free(k);
-    BN_CTX_free(ctx);
+    if (!expected_hash) return std::unexpected(expected_hash.error());
 
-    if (!expected_hash) {
-        return std::unexpected(expected_hash.error());
-    }
-
-    // Use constant-time comparison to prevent timing attacks
     return constant_time_compare(output, ByteView(expected_hash->data(), expected_hash->size()));
 }
 

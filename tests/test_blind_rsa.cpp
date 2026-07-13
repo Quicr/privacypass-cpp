@@ -194,7 +194,13 @@ TEST_SUITE("Blind RSA") {
         }
     }
 
+    // BoringSSL cannot parse RSA-PSS OID (1.2.840.113549.1.1.10) SPKI that
+    // OpenSSL generates. These test vectors use that format, so skip on BoringSSL.
     TEST_CASE("RFC 9578 public-verifiable token vectors verify") {
+#ifdef PRIVACY_PASS_WITH_BORINGSSL
+        MESSAGE("Skipped: BoringSSL does not support RSA-PSS OID in SPKI");
+        return;
+#endif
         const std::array files{
             "pub_verif_rfc9578.go.json",
             "pub_verif_rfc9578.rust.json",
