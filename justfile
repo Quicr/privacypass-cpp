@@ -12,6 +12,10 @@ backend := "openssl"
 # BoringSSL path (override with: just boringssl_dir=/path/to/boringssl ...)
 boringssl_dir := env("BORINGSSL_DIR", "../boringssl")
 
+# OpenSSL path (override with: just openssl_dir=/path/to/openssl ...)
+# Leave empty to use system default
+openssl_dir := env("OPENSSL_DIR", "")
+
 # Resolved build directory per backend
 build_dir := if backend == "boringssl" { "build-boringssl" } else { "build" }
 
@@ -25,7 +29,7 @@ configure:
         -DPRIVACY_PASS_BUILD_MOQ={{moq}} \
         -DPRIVACY_PASS_ENABLE_SANITIZERS={{sanitizers}} \
         -DPRIVACY_PASS_CRYPTO_BACKEND={{backend}} \
-        {{ if backend == "boringssl" { "-DOPENSSL_ROOT_DIR=" + boringssl_dir + " -DOPENSSL_INCLUDE_DIR=" + boringssl_dir + "/include -DOPENSSL_CRYPTO_LIBRARY=" + boringssl_dir + "/build/libcrypto.a -DOPENSSL_SSL_LIBRARY=" + boringssl_dir + "/build/libssl.a" } else { "" } }}
+        {{ if backend == "boringssl" { "-DOPENSSL_ROOT_DIR=" + boringssl_dir + " -DOPENSSL_INCLUDE_DIR=" + boringssl_dir + "/include -DOPENSSL_CRYPTO_LIBRARY=" + boringssl_dir + "/build/libcrypto.a -DOPENSSL_SSL_LIBRARY=" + boringssl_dir + "/build/libssl.a" } else if openssl_dir != "" { "-DOPENSSL_ROOT_DIR=" + openssl_dir } else { "" } }}
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
@@ -79,18 +83,32 @@ bench-json: build
 
 # ── Multi-backend ────────────────────────────────────────────────────────────
 
-# Build and test with OpenSSL
+# Build and test with OpenSSL (system default)
 test-openssl:
     just backend=openssl test
+
+# Build and test with OpenSSL 1.1 (requires openssl_dir or OPENSSL_DIR set)
+test-openssl11 dir="/usr/local/opt/openssl@1.1":
+    just backend=openssl openssl_dir={{dir}} test
+
+# Build and test with OpenSSL 3.x (requires openssl_dir or OPENSSL_DIR set)
+test-openssl3 dir="/usr/local/opt/openssl@3":
+    just backend=openssl openssl_dir={{dir}} test
 
 # Build and test with BoringSSL
 test-boringssl:
     just backend=boringssl test
 
-# Build and test both backends
+# Build and test all backends (system OpenSSL + BoringSSL)
 test-all:
     just backend=openssl test
     just backend=boringssl test
+
+# Build and test all crypto variants (OpenSSL 1.1, OpenSSL 3.x, BoringSSL)
+test-all-crypto openssl11_dir="/usr/local/opt/openssl@1.1" openssl3_dir="/usr/local/opt/openssl@3":
+    just test-openssl11 dir={{openssl11_dir}}
+    just test-openssl3 dir={{openssl3_dir}}
+    just test-boringssl
 
 # Run provider benchmarks on both backends
 bench-all:

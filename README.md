@@ -22,7 +22,7 @@ C++ implementation of the Privacy Pass protocol ([RFC9576](https://datatracker.i
 
 ## Building
 
-Requires CMake 3.20+, C++23 compiler, and OpenSSL 3.x or BoringSSL.
+Requires CMake 3.20+, C++23 compiler, and OpenSSL (1.1 or 3.x) or BoringSSL.
 See [docs/crypto_backend.md](docs/crypto_backend.md) for multi-backend setup.
 
 ```bash
@@ -40,9 +40,18 @@ just moq=OFF build  # Build without MOQ extension
 ## Testing
 
 ```bash
-just test
-# or
-./build/privacy_pass_tests
+just test                # Test with system OpenSSL
+just test-openssl3       # Test with OpenSSL 3.x
+just test-openssl11      # Test with OpenSSL 1.1
+just test-boringssl      # Test with BoringSSL
+just test-all-crypto     # Test all three variants
+```
+
+Custom OpenSSL paths:
+
+```bash
+just test-openssl11 dir=/path/to/openssl-1.1
+just test-openssl3 dir=/path/to/openssl-3.0
 ```
 
 ## License

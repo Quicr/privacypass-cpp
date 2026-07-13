@@ -8,29 +8,49 @@ on:
 
 jobs:
   build-linux:
-    name: Linux
+    name: Linux (${{ matrix.openssl }} ${{ matrix.build_type }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         build_type: [Release, Debug]
+        openssl: [openssl3]
+        include:
+          - openssl: openssl1.1
+            build_type: Release
+          - openssl: openssl1.1
+            build_type: Debug
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install OpenSSL 3.x
+        if: matrix.openssl == 'openssl3'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev
+
+      - name: Build and install OpenSSL 1.1
+        if: matrix.openssl == 'openssl1.1'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+          curl -fsSL https://www.openssl.org/source/openssl-1.1.1w.tar.gz | tar xz
+          cd openssl-1.1.1w
+          ./config --prefix=/opt/openssl-1.1 --openssldir=/opt/openssl-1.1 no-shared
+          make -j$(nproc)
+          sudo make install_sw
+          cd ..
+          rm -rf openssl-1.1.1w
 
       - name: Configure CMake
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
             -DPRIVACY_PASS_BUILD_TESTS=ON \
             -DPRIVACY_PASS_BUILD_BENCHMARKS=ON \
-            -DPRIVACY_PASS_BUILD_MOQ=ON
+            -DPRIVACY_PASS_BUILD_MOQ=ON \
+            ${{ matrix.openssl == 'openssl1.1' && '-DOPENSSL_ROOT_DIR=/opt/openssl-1.1' || '' }}
 
       - name: Build
         run: cmake --build build --parallel
