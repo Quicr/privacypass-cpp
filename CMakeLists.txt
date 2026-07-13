@@ -290,6 +290,10 @@ if(PRIVACY_PASS_BUILD_TESTS)
         doctest::doctest
         nlohmann_json::nlohmann_json
     )
+    # Treat third-party headers as system includes to suppress warnings on MSVC
+    target_include_directories(privacy_pass_tests SYSTEM PRIVATE
+        ${doctest_SOURCE_DIR}/doctest
+    )
     target_compile_definitions(privacy_pass_tests PRIVATE
         PRIVACY_PASS_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_data"
     )
