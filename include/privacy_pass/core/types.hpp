@@ -12,9 +12,11 @@
 #include <variant>
 #include <vector>
 
-#include <openssl/crypto.h>
-
 namespace privacy_pass {
+
+// Portable secure memory clearing (implemented by the active crypto backend).
+// Guaranteed not to be optimized away by the compiler.
+void secure_clear(void* ptr, size_t len) noexcept;
 
 // Token type constants (RFC 9578)
 enum class TokenType : uint16_t {
@@ -136,8 +138,7 @@ public:
 
     void clear() noexcept {
         if (!data_.empty()) {
-            // Use OPENSSL_cleanse for guaranteed secure memory clearing
-            OPENSSL_cleanse(data_.data(), data_.size());
+            secure_clear(data_.data(), data_.size());
             data_.clear();
         }
     }

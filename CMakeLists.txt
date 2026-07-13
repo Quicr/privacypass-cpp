@@ -13,6 +13,9 @@ option(PRIVACY_PASS_BUILD_MOQ "Build MOQ extension" ON)
 option(PRIVACY_PASS_BUILD_EXAMPLES "Build examples" ON)
 option(PRIVACY_PASS_ENABLE_SANITIZERS "Enable address and undefined sanitizers" OFF)
 
+# Crypto backend selection: "auto", "openssl", or "boringssl"
+set(PRIVACY_PASS_CRYPTO_BACKEND "auto" CACHE STRING "Crypto backend: auto, openssl, or boringssl")
+
 # Sanitizer flags (applied globally since they affect linking)
 if(PRIVACY_PASS_ENABLE_SANITIZERS)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -29,9 +32,35 @@ function(privacy_pass_set_warnings target)
 endfunction()
 
 # Dependencies
-find_package(OpenSSL 3.0 REQUIRED)
-
 include(FetchContent)
+include(CheckIncludeFileCXX)
+
+# Find OpenSSL (works for both OpenSSL and BoringSSL)
+if(PRIVACY_PASS_CRYPTO_BACKEND STREQUAL "auto" OR PRIVACY_PASS_CRYPTO_BACKEND STREQUAL "openssl")
+    find_package(OpenSSL 3.0 QUIET)
+    if(NOT OPENSSL_FOUND)
+        find_package(OpenSSL REQUIRED)
+    endif()
+else()
+    find_package(OpenSSL REQUIRED)
+endif()
+
+# Detect BoringSSL via header
+set(CMAKE_REQUIRED_INCLUDES ${OPENSSL_INCLUDE_DIR})
+check_include_file_cxx("openssl/is_boringssl.h" HAVE_BORINGSSL)
+
+# Resolve the crypto backend
+if(PRIVACY_PASS_CRYPTO_BACKEND STREQUAL "boringssl" OR
+   (PRIVACY_PASS_CRYPTO_BACKEND STREQUAL "auto" AND HAVE_BORINGSSL))
+    set(CRYPTO_BACKEND "boringssl")
+elseif(PRIVACY_PASS_CRYPTO_BACKEND STREQUAL "openssl" OR
+       PRIVACY_PASS_CRYPTO_BACKEND STREQUAL "auto")
+    set(CRYPTO_BACKEND "openssl")
+else()
+    message(FATAL_ERROR "Unknown crypto backend: ${PRIVACY_PASS_CRYPTO_BACKEND}")
+endif()
+
+message(STATUS "Privacy Pass crypto backend: ${CRYPTO_BACKEND}")
 
 # Silence MSVC deprecation warnings for spdlog's bundled fmt library
 if(MSVC)
@@ -51,7 +80,6 @@ FetchContent_MakeAvailable(spdlog)
 
 # Fetch doctest if building tests
 if(PRIVACY_PASS_BUILD_TESTS)
-    include(FetchContent)
     FetchContent_Declare(
         doctest
         GIT_REPOSITORY https://github.com/doctest/doctest.git
@@ -70,7 +98,6 @@ endif()
 
 # Fetch Google Benchmark if building benchmarks
 if(PRIVACY_PASS_BUILD_BENCHMARKS)
-    include(FetchContent)
     FetchContent_Declare(
         benchmark
         GIT_REPOSITORY https://github.com/google/benchmark.git
@@ -105,12 +132,13 @@ target_link_libraries(privacy_pass_core PRIVATE
     spdlog::spdlog
 )
 
-# Crypto library
+# Crypto library — single source files, backend selected via compat.hpp
 add_library(privacy_pass_crypto
-    src/crypto/blind_rsa.cpp
-    src/crypto/voprf.cpp
     src/crypto/hash.cpp
     src/crypto/random.cpp
+    src/crypto/blind_rsa.cpp
+    src/crypto/voprf.cpp
+    src/crypto/init.cpp
 )
 privacy_pass_set_warnings(privacy_pass_crypto)
 
@@ -118,6 +146,13 @@ target_link_libraries(privacy_pass_crypto PUBLIC
     privacy_pass_core
 )
 target_link_libraries(privacy_pass_crypto PRIVATE spdlog::spdlog)
+
+# Backend compile definition so code can query which backend is active
+if(CRYPTO_BACKEND STREQUAL "boringssl")
+    target_compile_definitions(privacy_pass_crypto PUBLIC PRIVACY_PASS_WITH_BORINGSSL)
+else()
+    target_compile_definitions(privacy_pass_crypto PUBLIC PRIVACY_PASS_WITH_OPENSSL)
+endif()
 
 # HTTP layer
 add_library(privacy_pass_http
@@ -241,6 +276,7 @@ if(PRIVACY_PASS_BUILD_TESTS)
         tests/test_origin.cpp
         tests/test_integration.cpp
         tests/test_http.cpp
+        tests/test_crypto_provider.cpp
     )
     if(PRIVACY_PASS_BUILD_MOQ)
         list(APPEND TEST_SOURCES tests/test_moq.cpp)
@@ -271,6 +307,7 @@ if(PRIVACY_PASS_BUILD_BENCHMARKS)
         benchmarks/bench_crypto.cpp
         benchmarks/bench_token_issuance.cpp
         benchmarks/bench_serialization.cpp
+        benchmarks/bench_crypto_provider.cpp
     )
     privacy_pass_set_warnings(privacy_pass_benchmarks)
 
