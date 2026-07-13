@@ -12,6 +12,9 @@
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4996)  // deprecated declarations
 #endif
 
 #include "common.hpp"
@@ -27,8 +30,12 @@
 #include <openssl/bytestring.h>
 #include <openssl/hkdf.h>
 #else
+#include <openssl/opensslv.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#define PRIVACY_PASS_OPENSSL3
 #include <openssl/core_names.h>
 #include <openssl/param_build.h>
+#endif
 #include <openssl/kdf.h>
 #endif
 
@@ -145,7 +152,7 @@ inline Result<void> validate_rsa_params(const EVP_PKEY* pkey,
         return std::unexpected(Error{ErrorCode::INVALID_KEY,
             "RSA key must be RSA-2048 with exponent 65537"});
     }
-#else
+#elif defined(PRIVACY_PASS_OPENSSL3)
     if (EVP_PKEY_base_id(pkey) != EVP_PKEY_RSA_PSS) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSASSA-PSS key"});
     }
@@ -182,6 +189,24 @@ inline Result<void> validate_rsa_params(const EVP_PKEY* pkey,
         !digest_ok(OSSL_PKEY_PARAM_RSA_MGF1_DIGEST, pkey)) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY,
             "RSASSA-PSS key must use SHA-384 and MGF1-SHA-384"});
+    }
+#else
+    // OpenSSL 1.1: use low-level RSA API
+    int pkey_type = EVP_PKEY_base_id(pkey);
+    if (pkey_type != EVP_PKEY_RSA && pkey_type != EVP_PKEY_RSA_PSS) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSA key"});
+    }
+    const RSA* rsa = EVP_PKEY_get0_RSA(const_cast<EVP_PKEY*>(pkey));
+    if (!rsa) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Failed to get RSA key"});
+    }
+    const BIGNUM* n = nullptr;
+    const BIGNUM* e = nullptr;
+    RSA_get0_key(rsa, &n, &e, nullptr);
+    if (!n || !e || BN_num_bits(n) != expected_bits ||
+        !BN_is_word(e, expected_e)) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY,
+            "RSA key must be RSA-2048 with exponent 65537"});
     }
 #endif
     return {};
@@ -260,13 +285,15 @@ inline Result<Bytes> marshal_public_key(const EVP_PKEY* pkey) {
     OPENSSL_free(data);
     return result;
 #else
-    int len = i2d_PUBKEY(pkey, nullptr);
+    // OpenSSL 1.1 i2d_PUBKEY doesn't accept const EVP_PKEY*
+    auto* mutable_pkey = const_cast<EVP_PKEY*>(pkey);
+    int len = i2d_PUBKEY(mutable_pkey, nullptr);
     if (len <= 0) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute SPKI size"});
     }
     Bytes result(static_cast<size_t>(len));
     uint8_t* p = result.data();
-    if (i2d_PUBKEY(pkey, &p) != len) {
+    if (i2d_PUBKEY(mutable_pkey, &p) != len) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to encode SPKI"});
     }
     return result;
@@ -290,13 +317,15 @@ inline Result<SecureBytes> marshal_private_key(const EVP_PKEY* pkey) {
     OPENSSL_free(data);
     return result;
 #else
-    int len = i2d_PrivateKey(pkey, nullptr);
+    // OpenSSL 1.1 i2d_PrivateKey doesn't accept const EVP_PKEY*
+    auto* mutable_pkey = const_cast<EVP_PKEY*>(pkey);
+    int len = i2d_PrivateKey(mutable_pkey, nullptr);
     if (len <= 0) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to compute PKCS#8 size"});
     }
     SecureBytes result(static_cast<size_t>(len));
     uint8_t* p = result.data();
-    if (i2d_PrivateKey(pkey, &p) != len) {
+    if (i2d_PrivateKey(mutable_pkey, &p) != len) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to encode PKCS#8"});
     }
     return result;
@@ -306,7 +335,8 @@ inline Result<SecureBytes> marshal_private_key(const EVP_PKEY* pkey) {
 // ── RSA key construction from components ─────────────────────────────────────
 
 inline UniqueEVP_PKEY rsa_public_key_from_components(const BIGNUM* n, const BIGNUM* e) {
-#ifdef PRIVACY_PASS_WITH_BORINGSSL
+#if defined(PRIVACY_PASS_WITH_BORINGSSL) || !defined(PRIVACY_PASS_OPENSSL3)
+    // BoringSSL and OpenSSL 1.1: use low-level RSA API
     RSA* rsa = RSA_new();
     if (!rsa) return nullptr;
     BIGNUM* n_dup = BN_dup(n);
@@ -324,6 +354,7 @@ inline UniqueEVP_PKEY rsa_public_key_from_components(const BIGNUM* n, const BIGN
     }
     return pkey;  // rsa ownership transferred to pkey
 #else
+    // OpenSSL 3.x: use EVP_PKEY_fromdata with OSSL_PARAM
     OSSL_PARAM_BLD* bld = OSSL_PARAM_BLD_new();
     if (!bld) return nullptr;
 
@@ -397,8 +428,9 @@ inline UniqueEVP_PKEY generate_rsa_pss_keypair(int bits, [[maybe_unused]] int sa
 // ── RSA get key parameters ───────────────────────────────────────────────────
 
 inline bool rsa_get_bn_param(const EVP_PKEY* pkey, const char* name, UniqueBIGNUM& out) {
-#ifdef PRIVACY_PASS_WITH_BORINGSSL
-    const RSA* rsa = EVP_PKEY_get0_RSA(pkey);
+#if defined(PRIVACY_PASS_WITH_BORINGSSL) || !defined(PRIVACY_PASS_OPENSSL3)
+    // BoringSSL and OpenSSL 1.1: use low-level RSA API
+    const RSA* rsa = EVP_PKEY_get0_RSA(const_cast<EVP_PKEY*>(pkey));
     if (!rsa) return false;
     const BIGNUM* n = nullptr;
     const BIGNUM* e = nullptr;
@@ -420,8 +452,9 @@ inline bool rsa_get_bn_param(const EVP_PKEY* pkey, const char* name, UniqueBIGNU
 
 inline bool rsa_get_secure_bn_param(const EVP_PKEY* pkey, const char* name,
                                      UniqueSecureBIGNUM& out) {
-#ifdef PRIVACY_PASS_WITH_BORINGSSL
-    const RSA* rsa = EVP_PKEY_get0_RSA(pkey);
+#if defined(PRIVACY_PASS_WITH_BORINGSSL) || !defined(PRIVACY_PASS_OPENSSL3)
+    // BoringSSL and OpenSSL 1.1: use low-level RSA API
+    const RSA* rsa = EVP_PKEY_get0_RSA(const_cast<EVP_PKEY*>(pkey));
     if (!rsa) return false;
     const BIGNUM* n = nullptr;
     const BIGNUM* e = nullptr;
@@ -441,7 +474,7 @@ inline bool rsa_get_secure_bn_param(const EVP_PKEY* pkey, const char* name,
 }
 
 // Portable param name constants
-#ifdef PRIVACY_PASS_WITH_BORINGSSL
+#if defined(PRIVACY_PASS_WITH_BORINGSSL) || !defined(PRIVACY_PASS_OPENSSL3)
 constexpr const char* PARAM_RSA_N = "n";
 constexpr const char* PARAM_RSA_E = "e";
 constexpr const char* PARAM_RSA_D = "d";
@@ -485,4 +518,6 @@ inline void backend_shutdown() {
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
 #endif

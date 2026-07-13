@@ -13,6 +13,9 @@
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4996)
 #endif
 
 #include <openssl/bn.h>
@@ -96,4 +99,6 @@ inline UniqueSecureBIGNUM bin2bn_secure(const uint8_t* data, int len) {
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
 #endif
