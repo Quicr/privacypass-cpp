@@ -1,0 +1,196 @@
+name: Benchmark
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  benchmark:
+    name: Performance Regression Check
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          path: pr
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev python3-pip
+          pip3 install google-benchmark
+
+      - name: Build base benchmarks
+        run: |
+          cmake -B base/build -S base \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPRIVACY_PASS_BUILD_TESTS=OFF \
+            -DPRIVACY_PASS_BUILD_BENCHMARKS=ON \
+            -DPRIVACY_PASS_BUILD_MOQ=OFF
+          cmake --build base/build --parallel --target privacy_pass_benchmarks
+
+      - name: Build PR benchmarks
+        run: |
+          cmake -B pr/build -S pr \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPRIVACY_PASS_BUILD_TESTS=OFF \
+            -DPRIVACY_PASS_BUILD_BENCHMARKS=ON \
+            -DPRIVACY_PASS_BUILD_MOQ=OFF
+          cmake --build pr/build --parallel --target privacy_pass_benchmarks
+
+      - name: Run base benchmarks
+        run: |
+          base/build/privacy_pass_benchmarks \
+            --benchmark_out=baseline.json \
+            --benchmark_out_format=json \
+            --benchmark_repetitions=5 \
+            --benchmark_min_time=0.5s \
+            2>/dev/null
+
+      - name: Run PR benchmarks
+        run: |
+          pr/build/privacy_pass_benchmarks \
+            --benchmark_out=current.json \
+            --benchmark_out_format=json \
+            --benchmark_repetitions=5 \
+            --benchmark_min_time=0.5s \
+            2>/dev/null
+
+      - name: Compare benchmarks
+        id: compare
+        run: |
+          python3 << 'PYEOF' > bench_report.md
+          import json
+          import sys
+
+          with open("baseline.json") as f:
+              baseline = json.load(f)
+          with open("current.json") as f:
+              current = json.load(f)
+
+          # Aggregate by name (median of repetitions)
+          def aggregate(data):
+              results = {}
+              for bm in data.get("benchmarks", []):
+                  name = bm["name"]
+                  # Skip aggregate rows from repetitions
+                  if name.endswith("_mean") or name.endswith("_stddev") or name.endswith("_cv"):
+                      continue
+                  # Use the _median row if present, otherwise raw
+                  if name.endswith("_median"):
+                      base_name = name.replace("_median", "")
+                      results[base_name] = bm["real_time"]
+                  elif name not in results:
+                      results[name] = bm["real_time"]
+              return results
+
+          base_results = aggregate(baseline)
+          pr_results = aggregate(current)
+
+          # Hot-path benchmarks that must not regress significantly
+          hot_path = {
+              "BM_BlindRSA_Verify", "BM_BlindRSA_Finalize",
+              "BM_VerifyToken_BlindRSA", "BM_FullProtocol_BlindRSA",
+              "BM_VOPRF_Evaluate", "BM_VOPRF_Finalize",
+              "BM_TokenChallenge_Serialize",
+              "BM_ByteReader_ReadU16_1000", "BM_ByteWriter_WriteU16_1000",
+          }
+
+          rows = []
+          has_regression = False
+          has_critical_regression = False
+
+          for name in sorted(set(base_results) | set(pr_results)):
+              if name not in base_results or name not in pr_results:
+                  continue
+              base_ns = base_results[name]
+              pr_ns = pr_results[name]
+              change_pct = ((pr_ns - base_ns) / base_ns) * 100
+
+              if change_pct > 5:
+                  status = "regression"
+                  has_regression = True
+                  if name in hot_path and change_pct > 10:
+                      has_critical_regression = True
+                      emoji = "&#x1F6A8;"  # siren
+                  else:
+                      emoji = "&#x26A0;"  # warning
+              elif change_pct < -5:
+                  status = "improvement"
+                  emoji = "&#x2705;"  # checkmark
+              else:
+                  status = "neutral"
+                  emoji = ""
+
+              is_hot = " **[hot-path]**" if name in hot_path else ""
+              rows.append((name, base_ns, pr_ns, change_pct, emoji, is_hot, abs(change_pct) > 5))
+
+          print("## Benchmark Results\n")
+
+          if has_critical_regression:
+              print("> **&#x1F6A8; Critical regression detected in hot-path benchmarks (>10%)**\n")
+          elif has_regression:
+              print("> **&#x26A0; Performance regressions detected (>5%)**\n")
+          else:
+              print("> &#x2705; No significant performance regressions\n")
+
+          # Show changed benchmarks first, then stable ones in a collapsed section
+          changed = [r for r in rows if r[6]]
+          stable = [r for r in rows if not r[6]]
+
+          def fmt_time(ns):
+              if ns >= 1_000_000:
+                  return f"{ns/1_000_000:.2f} ms"
+              elif ns >= 1_000:
+                  return f"{ns/1_000:.2f} us"
+              return f"{ns:.0f} ns"
+
+          if changed:
+              print("### Changed benchmarks\n")
+              print("| Benchmark | Base | PR | Change | |")
+              print("|-----------|------|----|--------|-|")
+              for name, base_ns, pr_ns, pct, emoji, hot, _ in changed:
+                  sign = "+" if pct > 0 else ""
+                  print(f"| {name}{hot} | {fmt_time(base_ns)} | {fmt_time(pr_ns)} | {sign}{pct:.1f}% | {emoji} |")
+              print()
+
+          if stable:
+              print("<details>")
+              print(f"<summary>Stable benchmarks ({len(stable)})</summary>\n")
+              print("| Benchmark | Base | PR | Change |")
+              print("|-----------|------|----|--------|")
+              for name, base_ns, pr_ns, pct, emoji, hot, _ in stable:
+                  sign = "+" if pct > 0 else ""
+                  print(f"| {name}{hot} | {fmt_time(base_ns)} | {fmt_time(pr_ns)} | {sign}{pct:.1f}% |")
+              print("\n</details>")
+
+          # Write status for the next step
+          with open("bench_status.txt", "w") as f:
+              f.write("critical" if has_critical_regression else "ok")
+
+          PYEOF
+
+      - name: Post benchmark comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: benchmark
+          path: bench_report.md
+
+      - name: Check for critical regressions
+        run: |
+          status=$(cat bench_status.txt)
+          if [ "$status" = "critical" ]; then
+            echo "::error::Critical performance regression detected in hot-path benchmarks (>10%)"
+            exit 1
+          fi
