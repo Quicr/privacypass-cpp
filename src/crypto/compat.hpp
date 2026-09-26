@@ -132,12 +132,16 @@ inline Result<Bytes> hkdf_expand(const EVP_MD* md, ByteView prk, ByteView info, 
 
 // ── RSA key validation ───────────────────────────────────────────────────────
 // OpenSSL 3.x: queries EVP_PKEY params via OSSL_PKEY_PARAM_*
-// BoringSSL:   queries RSA struct directly via RSA_get0_key
+// BoringSSL:   uses EVP_PKEY_id to check RSA-PSS type, queries RSA for n/e
 
 inline Result<void> validate_rsa_params(const EVP_PKEY* pkey,
                                         int expected_bits, unsigned long expected_e) {
 #ifdef PRIVACY_PASS_WITH_BORINGSSL
-    if (EVP_PKEY_id(pkey) != EVP_PKEY_RSA) {
+    // Keys parsed via EVP_pkey_rsa_pss_sha384() have EVP_PKEY_RSA_PSS type;
+    // keys built from components via EVP_PKEY_assign_RSA have EVP_PKEY_RSA.
+    // Accept both since PSS params are enforced at signing/verification time.
+    int pkey_type = EVP_PKEY_id(pkey);
+    if (pkey_type != EVP_PKEY_RSA && pkey_type != EVP_PKEY_RSA_PSS) {
         return std::unexpected(Error{ErrorCode::INVALID_KEY, "Not an RSA key"});
     }
     const RSA* rsa = EVP_PKEY_get0_RSA(pkey);
@@ -238,14 +242,11 @@ inline Result<Bytes> emsa_pss_encode(EVP_PKEY* pkey, ByteView msg_hash,
 
 inline UniqueEVP_PKEY parse_public_key_spki(ByteView spki) {
 #ifdef PRIVACY_PASS_WITH_BORINGSSL
-    // Try BoringSSL parser, fall back to d2i_PUBKEY for RSA-PSS SPKI
-    CBS cbs;
-    CBS_init(&cbs, spki.data(), spki.size());
-    UniqueEVP_PKEY pkey(EVP_parse_public_key(&cbs));
-    if (!pkey || CBS_len(&cbs) != 0) {
-        const uint8_t* p = spki.data();
-        pkey.reset(d2i_PUBKEY(nullptr, &p, static_cast<long>(spki.size())));
-    }
+    // Use the newer API that accepts an algorithm list, supporting RSA-PSS SPKI.
+    // EVP_pkey_rsa_pss_sha384() handles id-RSASSA-PSS with SHA-384/MGF1-SHA-384.
+    const EVP_PKEY_ALG* algs[] = {EVP_pkey_rsa_pss_sha384(), EVP_pkey_rsa()};
+    UniqueEVP_PKEY pkey(EVP_PKEY_from_subject_public_key_info(
+        spki.data(), spki.size(), algs, 2));
     return pkey;
 #else
     const uint8_t* p = spki.data();
@@ -255,10 +256,10 @@ inline UniqueEVP_PKEY parse_public_key_spki(ByteView spki) {
 
 inline UniqueEVP_PKEY parse_private_key_der(ByteView der) {
 #ifdef PRIVACY_PASS_WITH_BORINGSSL
-    CBS cbs;
-    CBS_init(&cbs, der.data(), der.size());
-    UniqueEVP_PKEY pkey(EVP_parse_private_key(&cbs));
-    if (pkey && CBS_len(&cbs) != 0) pkey.reset();
+    // Use the newer API that accepts an algorithm list, supporting RSA-PSS keys.
+    const EVP_PKEY_ALG* algs[] = {EVP_pkey_rsa_pss_sha384(), EVP_pkey_rsa()};
+    UniqueEVP_PKEY pkey(EVP_PKEY_from_private_key_info(
+        der.data(), der.size(), algs, 2));
     return pkey;
 #else
     const uint8_t* p = der.data();
@@ -394,6 +395,9 @@ inline UniqueEVP_PKEY rsa_public_key_from_components(const BIGNUM* n, const BIGN
 
 inline UniqueEVP_PKEY generate_rsa_pss_keypair(int bits, [[maybe_unused]] int salt_len) {
 #ifdef PRIVACY_PASS_WITH_BORINGSSL
+    // BoringSSL: generate a plain RSA key. PSS parameters (SHA-384, MGF1-SHA-384,
+    // saltLen=48) are specified at signing/verification time rather than in the key.
+    // The key type will be EVP_PKEY_RSA, which is accepted by validate_rsa_params.
     auto bn_e = make_bignum();
     if (!bn_e || !BN_set_word(bn_e.get(), RSA_F4)) return nullptr;
 
