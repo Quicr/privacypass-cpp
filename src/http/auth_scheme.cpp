@@ -32,6 +32,18 @@ std::optional<std::pair<std::string, std::string>> parse_auth_param(std::string_
     while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) {
         key.pop_back();
     }
+    // Validate key is a valid RFC 7230 token (tchar only)
+    for (char c : key) {
+        if (c <= 0x20 || c == 0x7F || c == '"' || c == '(' || c == ')' ||
+            c == ',' || c == '/' || c == ':' || c == ';' || c == '<' ||
+            c == '=' || c == '>' || c == '?' || c == '@' || c == '[' ||
+            c == '\\' || c == ']' || c == '{' || c == '}') {
+            return std::nullopt;
+        }
+    }
+    if (key.empty()) {
+        return std::nullopt;
+    }
     input.remove_prefix(eq_pos + 1);
 
     // Skip whitespace after '='

@@ -261,24 +261,74 @@ Result<UniqueEC_POINT> map_to_curve_sswu(const BIGNUM* u, const EC_GROUP* group,
         ByteView(y_sq_bytes.data(), y_sq_bytes.size()),
         ByteView(gx_bytes.data(), gx_bytes.size()));
 
-    if (!is_square) {
-        BN_mod_mul(x.get(), tv3.get(), x.get(), p.get(), ctx);
-
-        BN_mod_sqr(gx.get(), x.get(), p.get(), ctx);
-        BN_mod_add(gx.get(), gx.get(), A.get(), p.get(), ctx);
-        BN_mod_mul(gx.get(), gx.get(), x.get(), p.get(), ctx);
-        BN_mod_add(gx.get(), gx.get(), B.get(), p.get(), ctx);
-
-        exp = make_bignum();
-        BN_add(exp.get(), p.get(), one.get());
-        BN_rshift(exp.get(), exp.get(), 2);
-        BN_mod_exp(y.get(), gx.get(), exp.get(), p.get(), ctx);
+    // Compute both candidate x-coordinates and y-coordinates unconditionally
+    // to avoid timing side-channels from branching on is_square.
+    auto x2 = make_bignum();
+    auto gx2 = make_bignum();
+    auto y2 = make_bignum();
+    if (!x2 || !gx2 || !y2) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to allocate bignums"});
     }
 
+    // x2 = tv3 * x (candidate for !is_square case)
+    BN_mod_mul(x2.get(), tv3.get(), x.get(), p.get(), ctx);
+    BN_mod_sqr(gx2.get(), x2.get(), p.get(), ctx);
+    BN_mod_add(gx2.get(), gx2.get(), A.get(), p.get(), ctx);
+    BN_mod_mul(gx2.get(), gx2.get(), x2.get(), p.get(), ctx);
+    BN_mod_add(gx2.get(), gx2.get(), B.get(), p.get(), ctx);
+
+    auto exp2 = make_bignum();
+    if (!exp2) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to allocate bignums"});
+    }
+    BN_add(exp2.get(), p.get(), one.get());
+    BN_rshift(exp2.get(), exp2.get(), 2);
+    BN_mod_exp(y2.get(), gx2.get(), exp2.get(), p.get(), ctx);
+
+    // Constant-time select: if is_square, keep (x, y); otherwise use (x2, y2).
+    // Serialize both candidates and use byte-level masking to select.
+    {
+        int field_len = BN_num_bytes(p.get());
+        Bytes x1_bytes(static_cast<size_t>(field_len));
+        Bytes x2_bytes(static_cast<size_t>(field_len));
+        Bytes y1_bytes(static_cast<size_t>(field_len));
+        Bytes y2_bytes(static_cast<size_t>(field_len));
+        BN_bn2binpad(x.get(), x1_bytes.data(), field_len);
+        BN_bn2binpad(x2.get(), x2_bytes.data(), field_len);
+        BN_bn2binpad(y.get(), y1_bytes.data(), field_len);
+        BN_bn2binpad(y2.get(), y2_bytes.data(), field_len);
+
+        // mask = 0x00 if is_square, 0xFF if !is_square
+        uint8_t mask = static_cast<uint8_t>(-(int)(!is_square));
+        for (int i = 0; i < field_len; ++i) {
+            x1_bytes[i] ^= mask & (x1_bytes[i] ^ x2_bytes[i]);
+            y1_bytes[i] ^= mask & (y1_bytes[i] ^ y2_bytes[i]);
+        }
+        BN_bin2bn(x1_bytes.data(), field_len, x.get());
+        BN_bin2bn(y1_bytes.data(), field_len, y.get());
+    }
+
+    // Constant-time sign correction: negate y if sgn0(u) != sgn0(y)
     int sgn0_u = BN_is_odd(u);
     int sgn0_y = BN_is_odd(y.get());
-    if (sgn0_u != sgn0_y) {
-        BN_sub(y.get(), p.get(), y.get());
+    {
+        int field_len = BN_num_bytes(p.get());
+        auto neg_y = make_bignum();
+        if (!neg_y) {
+            return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to allocate bignums"});
+        }
+        BN_sub(neg_y.get(), p.get(), y.get());
+
+        Bytes y_bytes(static_cast<size_t>(field_len));
+        Bytes ny_bytes(static_cast<size_t>(field_len));
+        BN_bn2binpad(y.get(), y_bytes.data(), field_len);
+        BN_bn2binpad(neg_y.get(), ny_bytes.data(), field_len);
+
+        uint8_t mask = static_cast<uint8_t>(-(sgn0_u != sgn0_y));
+        for (int i = 0; i < field_len; ++i) {
+            y_bytes[i] ^= mask & (y_bytes[i] ^ ny_bytes[i]);
+        }
+        BN_bin2bn(y_bytes.data(), field_len, y.get());
     }
 
     auto point = make_ec_point(group);
@@ -428,9 +478,11 @@ Result<Bytes> generate_dleq_proof(
     auto& [M, composite_Z] = *composites;
 
     auto t = make_bignum();
-    if (!BN_rand_range(t.get(), order.get()) || BN_is_zero(t.get())) {
-        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to generate random scalar"});
-    }
+    do {
+        if (!BN_rand_range(t.get(), order.get())) {
+            return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to generate random scalar"});
+        }
+    } while (BN_is_zero(t.get()));
 
     auto A = make_ec_point(group);
     if (!A || EC_POINT_mul(group, A.get(), t.get(), nullptr, nullptr, ctx) != 1) {
@@ -847,6 +899,13 @@ Result<VoprfEvaluation> VoprfServer::blind_evaluate(ByteView blinded_element) co
     auto scalar_bytes = impl_->private_key.to_bytes();
     if (!scalar_bytes) return std::unexpected(scalar_bytes.error());
 
+    // Ensure the scalar is always cleared, even on error paths
+    auto scalar_guard = [&]() { scalar_bytes->clear(); };
+    struct ScopeGuard {
+        decltype(scalar_guard)& fn;
+        ~ScopeGuard() { fn(); }
+    } guard{scalar_guard};
+
     auto k = bin2bn_secure(scalar_bytes->data(), static_cast<int>(scalar_bytes->size()));
 
     auto Z = make_ec_point(group);
@@ -875,7 +934,6 @@ Result<VoprfEvaluation> VoprfServer::blind_evaluate(ByteView blinded_element) co
     result.evaluated_element = std::move(*z_bytes);
     result.proof = std::move(*proof_result);
 
-    scalar_bytes->clear();
     return result;
 }
 
@@ -899,6 +957,13 @@ Result<bool> VoprfServer::verify_finalize(ByteView input, ByteView output) const
     auto scalar_bytes = impl_->private_key.to_bytes();
     if (!scalar_bytes) return std::unexpected(scalar_bytes.error());
 
+    // Ensure the scalar is always cleared, even on error paths
+    auto scalar_guard = [&]() { scalar_bytes->clear(); };
+    struct ScopeGuard {
+        decltype(scalar_guard)& fn;
+        ~ScopeGuard() { fn(); }
+    } guard{scalar_guard};
+
     auto k = bin2bn_secure(scalar_bytes->data(), static_cast<int>(scalar_bytes->size()));
 
     auto expected = make_ec_point(group);
@@ -910,9 +975,6 @@ Result<bool> VoprfServer::verify_finalize(ByteView input, ByteView output) const
     if (!expected_bytes) return std::unexpected(expected_bytes.error());
 
     auto expected_hash = finalize_output(input, ByteView(expected_bytes->data(), expected_bytes->size()));
-
-    scalar_bytes->clear();
-
     if (!expected_hash) return std::unexpected(expected_hash.error());
 
     return constant_time_compare(output, ByteView(expected_hash->data(), expected_hash->size()));

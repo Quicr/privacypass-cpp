@@ -54,7 +54,8 @@ inline std::string get_openssl_error() {
 }
 
 inline std::string get_sanitized_error() {
-    spdlog::debug("Crypto error: {}", get_openssl_error());
+    // Consume the error from the queue without logging implementation details
+    ERR_clear_error();
     return "Cryptographic operation failed";
 }
 

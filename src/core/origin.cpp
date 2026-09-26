@@ -120,10 +120,25 @@ size_t ReplayCache::size() const {
 }
 
 // PublicOrigin implementation
+struct TokenKeyIdHash {
+    size_t operator()(const TokenKeyId& id) const {
+        size_t hash = 0;
+        for (size_t i = 0; i < id.size(); i += sizeof(size_t)) {
+            size_t chunk = 0;
+            std::memcpy(&chunk, id.data() + i, std::min(sizeof(size_t), id.size() - i));
+            hash ^= chunk + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+        return hash;
+    }
+};
+
 struct PublicOrigin::Impl {
     OriginConfig config;
     std::vector<crypto::BlindRsaPublicKey> issuer_keys;
-    std::unordered_map<uint8_t, size_t> key_index_by_truncated_id;
+    // Map truncated ID (last byte) to a list of full key IDs for that bucket
+    std::unordered_map<uint8_t, std::vector<size_t>> key_indices_by_truncated_id;
+    // Direct lookup by full key ID for removal
+    std::unordered_map<TokenKeyId, size_t, TokenKeyIdHash> key_index_by_full_id;
     ReplayCache replay_cache;
 
     explicit Impl(OriginConfig cfg)
@@ -194,22 +209,14 @@ Result<bool> PublicOrigin::verify(
             "Challenge digest mismatch"});
     }
 
-    // Find issuer key by truncated ID
-    uint8_t truncated_id = token.token_key_id[31];
-    auto it = impl_->key_index_by_truncated_id.find(truncated_id);
-    if (it == impl_->key_index_by_truncated_id.end()) {
+    // Look up by full key ID first, fall back to truncated ID scan
+    auto full_it = impl_->key_index_by_full_id.find(token.token_key_id);
+    if (full_it == impl_->key_index_by_full_id.end()) {
         return std::unexpected(Error{ErrorCode::ISSUER_UNKNOWN,
             "Unknown issuer key"});
     }
 
-    const auto& key = impl_->issuer_keys[it->second];
-
-    // Verify full key ID matches
-    auto key_id = key.key_id();
-    if (!key_id || *key_id != token.token_key_id) {
-        return std::unexpected(Error{ErrorCode::ISSUER_UNKNOWN,
-            "Key ID mismatch"});
-    }
+    const auto& key = impl_->issuer_keys[full_it->second];
 
     // Build authenticator input
     auto auth_input = token.authenticator_input();
@@ -228,45 +235,46 @@ Result<bool> PublicOrigin::verify_and_redeem(
     const Token& token,
     const TokenChallenge& expected_challenge) {
 
-    // Check if this would be a replay (without adding to cache yet)
-    if (impl_->replay_cache.contains(token.nonce)) {
+    // Atomically check and reserve the nonce before verification to prevent
+    // concurrent threads from both verifying the same token.
+    if (!impl_->replay_cache.check_and_add(token.nonce)) {
         return std::unexpected(Error{ErrorCode::TOKEN_REPLAYED,
             "Token has already been redeemed"});
     }
 
-    // Verify the token first
+    // Verify the token
     auto verify_result = verify(token, expected_challenge);
     if (!verify_result) {
         return std::unexpected(verify_result.error());
     }
 
-    if (!*verify_result) {
-        return false;
-    }
-
-    // Only add to replay cache after successful verification
-    if (!impl_->replay_cache.check_and_add(token.nonce)) {
-        // Race condition: another thread redeemed the same token
-        return std::unexpected(Error{ErrorCode::TOKEN_REPLAYED,
-            "Token has already been redeemed"});
-    }
-
-    return true;
+    return *verify_result;
 }
 
 void PublicOrigin::add_issuer_key(crypto::BlindRsaPublicKey key) {
     auto key_id = key.key_id();
     if (key_id) {
         size_t index = impl_->issuer_keys.size();
-        impl_->key_index_by_truncated_id[(*key_id)[31]] = index;
+        impl_->key_indices_by_truncated_id[(*key_id)[31]].push_back(index);
+        impl_->key_index_by_full_id[*key_id] = index;
         impl_->issuer_keys.push_back(std::move(key));
     }
 }
 
 void PublicOrigin::remove_issuer_key(const TokenKeyId& key_id) {
-    impl_->key_index_by_truncated_id.erase(key_id[31]);
-    // Note: This doesn't remove from vector to keep indices stable
-    // A production implementation might want to handle this differently
+    auto it = impl_->key_index_by_full_id.find(key_id);
+    if (it != impl_->key_index_by_full_id.end()) {
+        size_t index = it->second;
+        impl_->key_index_by_full_id.erase(it);
+
+        // Remove from truncated ID bucket
+        uint8_t truncated = key_id[31];
+        auto& bucket = impl_->key_indices_by_truncated_id[truncated];
+        bucket.erase(std::remove(bucket.begin(), bucket.end(), index), bucket.end());
+        if (bucket.empty()) {
+            impl_->key_indices_by_truncated_id.erase(truncated);
+        }
+    }
 }
 
 // PrivateOrigin implementation
@@ -455,30 +463,18 @@ Result<bool> Origin::verify_and_redeem(
     const Token& token,
     const TokenChallenge& expected_challenge) {
 
-    // Check if this would be a replay (without adding to cache yet)
-    if (impl_->replay_cache.contains(token.nonce)) {
+    // Atomically check and reserve the nonce before verification
+    if (!impl_->replay_cache.check_and_add(token.nonce)) {
         return std::unexpected(Error{ErrorCode::TOKEN_REPLAYED,
             "Token has already been redeemed"});
     }
 
-    // Verify the token first
     auto verify_result = verify(token, expected_challenge);
     if (!verify_result) {
         return std::unexpected(verify_result.error());
     }
 
-    if (!*verify_result) {
-        return false;
-    }
-
-    // Only add to replay cache after successful verification
-    if (!impl_->replay_cache.check_and_add(token.nonce)) {
-        // Race condition: another thread redeemed the same token
-        return std::unexpected(Error{ErrorCode::TOKEN_REPLAYED,
-            "Token has already been redeemed"});
-    }
-
-    return true;
+    return *verify_result;
 }
 
 const OriginConfig& Origin::config() const {

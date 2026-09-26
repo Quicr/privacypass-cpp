@@ -120,6 +120,9 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
     }
 
     int mod_size = BN_num_bytes(n_bn.get());
+    if (mod_size != RSA_MODULUS_SIZE) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Unexpected RSA modulus size"});
+    }
 
     auto encoded = do_emsa_pss_encode(impl_->pkey.get(), msg);
     if (!encoded) return std::unexpected(encoded.error());
@@ -132,9 +135,9 @@ Result<BlindingData> BlindRsaPublicKey::blind(ByteView msg) const {
     auto bn_ctx = make_bn_ctx();
     auto r = make_secure_bignum();
     auto r_inv = make_secure_bignum();
-    auto x = make_bignum();
-    auto x_mont = make_bignum();
-    auto blinded = make_bignum();
+    auto x = make_secure_bignum();
+    auto x_mont = make_secure_bignum();
+    auto blinded = make_secure_bignum();
     auto mont = make_bn_mont_ctx();
 
     if (!bn_ctx || !r || !r_inv || !x || !x_mont || !blinded || !mont) {
@@ -184,6 +187,9 @@ Result<Bytes> BlindRsaPublicKey::finalize(
     }
 
     int mod_size = BN_num_bytes(n_bn.get());
+    if (mod_size != RSA_MODULUS_SIZE) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Unexpected RSA modulus size"});
+    }
     auto expected_size = static_cast<size_t>(mod_size);
     if (blind_sig.size() != expected_size || blinding_data.inverse.size() != expected_size) {
         return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
@@ -195,14 +201,14 @@ Result<Bytes> BlindRsaPublicKey::finalize(
     auto r_inv = bin2bn_secure(blinding_data.inverse.data(),
         static_cast<int>(blinding_data.inverse.size()));
     auto r_inv_mont = make_secure_bignum();
-    auto sig = make_bignum();
+    auto sig = make_secure_bignum();
     auto mont = make_bn_mont_ctx();
 
     if (!bn_ctx || !z || !r_inv || !r_inv_mont || !sig || !mont) {
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Failed to allocate bignums"});
     }
 
-    if (BN_cmp(z.get(), n_bn.get()) >= 0) {
+    if (BN_is_zero(z.get()) || BN_cmp(z.get(), n_bn.get()) >= 0) {
         return std::unexpected(Error{ErrorCode::UNBLINDING_FAILED, "Blind signature out of range"});
     }
 
@@ -216,12 +222,11 @@ Result<Bytes> BlindRsaPublicKey::finalize(
     BN_bn2binpad(sig.get(), result.data(), mod_size);
     blinding_data.inverse.clear();
 
-    if (!msg.empty()) {
-        auto verify_result = verify(msg, ByteView(result.data(), result.size()));
-        if (!verify_result || !*verify_result) {
-            return std::unexpected(Error{ErrorCode::VERIFICATION_FAILED,
-                "Unblinded signature verification failed"});
-        }
+    // Always verify the unblinded signature per RFC 9474
+    auto verify_result = verify(msg, ByteView(result.data(), result.size()));
+    if (!verify_result || !*verify_result) {
+        return std::unexpected(Error{ErrorCode::VERIFICATION_FAILED,
+            "Unblinded signature verification failed"});
     }
 
     return result;
@@ -274,7 +279,7 @@ BlindRsaPrivateKey& BlindRsaPrivateKey::operator=(BlindRsaPrivateKey&&) noexcept
 Result<std::pair<BlindRsaPrivateKey, BlindRsaPublicKey>> BlindRsaPrivateKey::generate() {
     auto pkey = generate_rsa_pss_keypair(RSA_BITS, SALT_LENGTH);
     if (!pkey) {
-        spdlog::debug("Key generation failed: {}", get_openssl_error());
+        ERR_clear_error();
         return std::unexpected(Error{ErrorCode::CRYPTO_ERROR, "Key generation failed"});
     }
 
@@ -334,6 +339,9 @@ Result<Bytes> BlindRsaPrivateKey::blind_sign(ByteView blinded_msg) const {
     }
 
     int mod_size = BN_num_bytes(n_bn.get());
+    if (mod_size != RSA_MODULUS_SIZE) {
+        return std::unexpected(Error{ErrorCode::INVALID_KEY, "Unexpected RSA modulus size"});
+    }
     if (blinded_msg.size() != static_cast<size_t>(mod_size)) {
         return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
             "Blinded message must match RSA modulus size"});

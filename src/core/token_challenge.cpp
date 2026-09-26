@@ -106,6 +106,11 @@ Result<TokenChallenge> TokenChallenge::deserialize(ByteView data) {
         return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read issuer_name"});
     }
 
+    if (*issuer_len == 0) {
+        return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
+            "issuer_name must not be empty"});
+    }
+
     TokenChallenge challenge;
     challenge.token_type = static_cast<TokenType>(*type);
     challenge.issuer_name = std::string(
@@ -148,11 +153,18 @@ Result<TokenChallenge> TokenChallenge::deserialize(ByteView data) {
         size_t pos = 0;
         while (pos < origin_str.size()) {
             size_t comma = origin_str.find(',', pos);
+            std::string entry;
             if (comma == std::string::npos) {
-                challenge.origin_info.push_back(origin_str.substr(pos));
+                entry = origin_str.substr(pos);
+                if (!entry.empty()) {
+                    challenge.origin_info.push_back(std::move(entry));
+                }
                 break;
             }
-            challenge.origin_info.push_back(origin_str.substr(pos, comma - pos));
+            entry = origin_str.substr(pos, comma - pos);
+            if (!entry.empty()) {
+                challenge.origin_info.push_back(std::move(entry));
+            }
             pos = comma + 1;
         }
     }
