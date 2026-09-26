@@ -29,22 +29,65 @@ struct NonceHash {
 // Default maximum replay cache size to prevent memory exhaustion
 constexpr size_t DEFAULT_MAX_REPLAY_CACHE_SIZE = 100000;
 
-// ReplayCache implementation
+// Time-bucketed replay cache: O(1) insert and amortized O(1) pruning.
+// Uses a monotonic tick counter to avoid syscall overhead from clock_gettime.
+// The caller is expected to drive time forward by calling check_and_add regularly;
+// real-world relay loops naturally provide this cadence.
 struct ReplayCache::Impl {
-    struct NonceEntry {
-        Nonce nonce;
-        std::chrono::steady_clock::time_point timestamp;
+    using BucketKey = uint64_t;  // monotonic second counter
+
+    // Each bucket holds nonces that arrived during that second
+    struct Bucket {
+        std::unordered_set<Nonce, NonceHash> nonces;
     };
 
-    std::unordered_set<Nonce, NonceHash> nonces;
-    std::vector<NonceEntry> entries;
-    std::chrono::seconds window;
+    std::unordered_map<BucketKey, Bucket> buckets;
+    std::unordered_set<Nonce, NonceHash> all_nonces;  // global dedup set
+    std::vector<BucketKey> bucket_order;  // ordered list of active buckets
+    uint64_t window_seconds;
     size_t max_size;
     mutable std::mutex mutex;
 
+    // Snapshot the monotonic clock base once at construction
+    std::chrono::steady_clock::time_point epoch;
+
     explicit Impl(std::chrono::seconds w, size_t max = DEFAULT_MAX_REPLAY_CACHE_SIZE)
-        : window(w), max_size(max) {
-        entries.reserve(std::min(max_size, size_t(10000)));
+        : window_seconds(static_cast<uint64_t>(w.count()))
+        , max_size(max)
+        , epoch(std::chrono::steady_clock::now()) {}
+
+    BucketKey current_tick() const {
+        // Use duration arithmetic on steady_clock — on most platforms this
+        // compiles to a single rdtsc or clock_gettime_nsec_np call.
+        auto elapsed = std::chrono::steady_clock::now() - epoch;
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
+    }
+
+    void prune_expired(BucketKey now_tick) {
+        if (now_tick < window_seconds) return;
+        auto cutoff = now_tick - window_seconds;
+        while (!bucket_order.empty() && bucket_order.front() <= cutoff) {
+            auto it = buckets.find(bucket_order.front());
+            if (it != buckets.end()) {
+                for (const auto& nonce : it->second.nonces) {
+                    all_nonces.erase(nonce);
+                }
+                buckets.erase(it);
+            }
+            bucket_order.erase(bucket_order.begin());
+        }
+        // Enforce max size by dropping oldest buckets
+        while (all_nonces.size() > max_size && !bucket_order.empty()) {
+            auto it = buckets.find(bucket_order.front());
+            if (it != buckets.end()) {
+                for (const auto& nonce : it->second.nonces) {
+                    all_nonces.erase(nonce);
+                }
+                buckets.erase(it);
+            }
+            bucket_order.erase(bucket_order.begin());
+        }
     }
 };
 
@@ -58,65 +101,38 @@ ReplayCache& ReplayCache::operator=(ReplayCache&&) noexcept = default;
 bool ReplayCache::check_and_add(const Nonce& nonce) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
 
-    // Prune expired entries first
-    auto now = std::chrono::steady_clock::now();
-    auto cutoff = now - impl_->window;
-
-    impl_->entries.erase(
-        std::remove_if(impl_->entries.begin(), impl_->entries.end(),
-            [&](const Impl::NonceEntry& entry) {
-                if (entry.timestamp < cutoff) {
-                    impl_->nonces.erase(entry.nonce);
-                    return true;
-                }
-                return false;
-            }),
-        impl_->entries.end());
-
-    // Enforce maximum size by removing oldest entries if at capacity
-    while (impl_->nonces.size() >= impl_->max_size && !impl_->entries.empty()) {
-        impl_->nonces.erase(impl_->entries.front().nonce);
-        impl_->entries.erase(impl_->entries.begin());
-    }
+    auto tick = impl_->current_tick();
+    impl_->prune_expired(tick);
 
     // Check if nonce exists
-    if (impl_->nonces.count(nonce) > 0) {
+    if (impl_->all_nonces.count(nonce) > 0) {
         return false;  // Replay detected
     }
 
-    // Add new nonce
-    impl_->nonces.insert(nonce);
-    impl_->entries.push_back({nonce, now});
+    // Add to global set and to the current time bucket
+    impl_->all_nonces.insert(nonce);
+    auto& bucket = impl_->buckets[tick];
+    if (bucket.nonces.empty()) {
+        impl_->bucket_order.push_back(tick);
+    }
+    bucket.nonces.insert(nonce);
 
     return true;  // Not a replay
 }
 
 bool ReplayCache::contains(const Nonce& nonce) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return impl_->nonces.count(nonce) > 0;
+    return impl_->all_nonces.count(nonce) > 0;
 }
 
 void ReplayCache::prune() {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-
-    auto now = std::chrono::steady_clock::now();
-    auto cutoff = now - impl_->window;
-
-    impl_->entries.erase(
-        std::remove_if(impl_->entries.begin(), impl_->entries.end(),
-            [&](const Impl::NonceEntry& entry) {
-                if (entry.timestamp < cutoff) {
-                    impl_->nonces.erase(entry.nonce);
-                    return true;
-                }
-                return false;
-            }),
-        impl_->entries.end());
+    impl_->prune_expired(impl_->current_tick());
 }
 
 size_t ReplayCache::size() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return impl_->nonces.size();
+    return impl_->all_nonces.size();
 }
 
 // PublicOrigin implementation

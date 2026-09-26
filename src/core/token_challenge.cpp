@@ -13,12 +13,12 @@ TokenChallenge TokenChallenge::create(
     std::optional<ChallengeDigest> context,
     std::vector<std::string> origins) {
 
-    return TokenChallenge{
-        .token_type = type,
-        .issuer_name = std::move(issuer),
-        .redemption_context = context,
-        .origin_info = std::move(origins),
-    };
+    TokenChallenge c;
+    c.token_type = type;
+    c.issuer_name = std::move(issuer);
+    c.redemption_context = context;
+    c.origin_info = std::move(origins);
+    return c;
 }
 
 std::string TokenChallenge::origin_info_string() const {
@@ -38,8 +38,13 @@ size_t TokenChallenge::serialized_size() const noexcept {
         size += 32;  // Fixed 32 bytes
     }
 
-    std::string origin_str = origin_info_string();
-    size += 2 + origin_str.size();  // length-prefixed origin_info
+    // Compute origin_info length without building a string
+    size_t origin_len = 0;
+    for (size_t i = 0; i < origin_info.size(); ++i) {
+        if (i > 0) origin_len += 1;  // comma
+        origin_len += origin_info[i].size();
+    }
+    size += 2 + origin_len;  // length-prefixed origin_info
 
     return size;
 }
@@ -177,12 +182,20 @@ Result<TokenChallenge> TokenChallenge::deserialize(ByteView data) {
 }
 
 Result<ChallengeDigest> TokenChallenge::digest() const {
+    if (cached_digest_) {
+        return *cached_digest_;
+    }
+
     auto serialized = serialize();
     if (!serialized) {
         return std::unexpected(serialized.error());
     }
 
-    return crypto::sha256(ByteView(serialized->data(), serialized->size()));
+    auto hash = crypto::sha256(ByteView(serialized->data(), serialized->size()));
+    if (hash) {
+        cached_digest_ = *hash;
+    }
+    return hash;
 }
 
 }  // namespace privacy_pass

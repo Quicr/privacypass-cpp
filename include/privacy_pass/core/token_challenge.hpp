@@ -32,7 +32,7 @@ struct TokenChallenge {
     // Deserialize from wire format (zero-copy where possible)
     [[nodiscard]] static Result<TokenChallenge> deserialize(ByteView data);
 
-    // Compute SHA-256 digest of serialized challenge
+    // Compute SHA-256 digest of serialized challenge (cached after first call)
     [[nodiscard]] Result<ChallengeDigest> digest() const;
 
     // Get origin_info as comma-separated string
@@ -40,6 +40,9 @@ struct TokenChallenge {
 
     // Serialized size
     [[nodiscard]] size_t serialized_size() const noexcept;
+
+private:
+    mutable std::optional<ChallengeDigest> cached_digest_;
 };
 
 }  // namespace privacy_pass
