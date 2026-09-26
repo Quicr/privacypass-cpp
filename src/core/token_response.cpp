@@ -3,6 +3,7 @@
 #include <privacy_pass/core/token_response.hpp>
 
 #include <spdlog/spdlog.h>
+#include <limits>
 
 namespace privacy_pass {
 
@@ -157,7 +158,9 @@ Result<OptionalTokenResponse> OptionalTokenResponse::deserialize(ByteView data) 
 
 // BatchedTokenResponse implementation
 Result<Bytes> BatchedTokenResponse::serialize() const {
-    ByteWriter writer;
+    // Serialize each response once and cache the results
+    std::vector<Bytes> serialized_responses;
+    serialized_responses.reserve(responses.size());
 
     size_t payload_size = 0;
     for (const auto& resp : responses) {
@@ -165,17 +168,20 @@ Result<Bytes> BatchedTokenResponse::serialize() const {
         if (!serialized) {
             return std::unexpected(serialized.error());
         }
+        // Overflow check before accumulating
+        if (payload_size > std::numeric_limits<size_t>::max() - serialized->size()) {
+            return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
+                "Batch payload size overflow"});
+        }
         payload_size += serialized->size();
+        serialized_responses.push_back(std::move(*serialized));
     }
 
+    ByteWriter writer;
     writer.write_varint(payload_size);
 
-    for (const auto& resp : responses) {
-        auto serialized = resp.serialize();
-        if (!serialized) {
-            return std::unexpected(serialized.error());
-        }
-        writer.write_bytes(ByteView(serialized->data(), serialized->size()));
+    for (const auto& serialized : serialized_responses) {
+        writer.write_bytes(ByteView(serialized.data(), serialized.size()));
     }
 
     return writer.take();

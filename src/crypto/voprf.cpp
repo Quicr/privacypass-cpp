@@ -35,9 +35,10 @@ private:
     P384Group() {
         group_ = EC_GROUP_new_by_curve_name(NID_secp384r1);
     }
-    ~P384Group() {
-        if (group_) EC_GROUP_free(group_);
-    }
+    // Intentionally leak: EC_GROUP is process-lifetime. Calling EC_GROUP_free
+    // during static destruction races with OpenSSL/BoringSSL teardown order
+    // and can corrupt already-freed state.
+    ~P384Group() = default;
     P384Group(const P384Group&) = delete;
     P384Group& operator=(const P384Group&) = delete;
     EC_GROUP* group_ = nullptr;

@@ -84,6 +84,11 @@ using Bytes = std::vector<uint8_t>;
 using ByteView = std::span<const uint8_t>;
 using MutableByteView = std::span<uint8_t>;
 
+// Constant-time comparison of two byte buffers.
+// Returns true iff the buffers have equal length and equal contents.
+// Timing is independent of buffer contents, preventing side-channel attacks.
+[[nodiscard]] bool constant_time_equal(ByteView a, ByteView b) noexcept;
+
 // Fixed-size byte arrays for common sizes
 using Nonce = std::array<uint8_t, 32>;
 using ChallengeDigest = std::array<uint8_t, 32>;

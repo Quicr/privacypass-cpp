@@ -3,6 +3,7 @@
 #include <privacy_pass/core/token_authenticator.hpp>
 
 #include <spdlog/spdlog.h>
+#include <deque>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -34,14 +35,22 @@ namespace {
 
 struct NonceHash {
     size_t operator()(const Nonce& nonce) const {
+        // Fast hash: reinterpret first sizeof(size_t) bytes of the 32-byte nonce
         size_t hash = 0;
-        for (size_t i = 0; i < nonce.size(); i += sizeof(size_t)) {
-            size_t chunk = 0;
-            std::memcpy(&chunk, nonce.data() + i, std::min(sizeof(size_t), nonce.size() - i));
-            hash ^= chunk + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-        }
+        std::memcpy(&hash, nonce.data(), sizeof(size_t));
         return hash;
     }
+};
+
+// Transparent hash/equal for heterogeneous string_view lookup
+struct StringHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view sv) const { return std::hash<std::string_view>{}(sv); }
+    size_t operator()(const std::string& s) const { return std::hash<std::string_view>{}(s); }
+};
+struct StringEqual {
+    using is_transparent = void;
+    bool operator()(std::string_view a, std::string_view b) const { return a == b; }
 };
 
 }  // namespace
@@ -49,15 +58,15 @@ struct NonceHash {
 struct TokenAuthenticator::Impl {
     TokenAuthenticatorConfig config;
     Origin origin;
-    std::unordered_map<std::string, std::vector<crypto::BlindRsaPublicKey>> rsa_keys;
-    std::unordered_map<std::string, std::vector<crypto::VoprfPublicKey>> voprf_keys;
+    std::unordered_map<std::string, std::vector<crypto::BlindRsaPublicKey>, StringHash, StringEqual> rsa_keys;
+    std::unordered_map<std::string, std::vector<crypto::VoprfPublicKey>, StringHash, StringEqual> voprf_keys;
 
     struct NonceEntry {
         Nonce nonce;
         std::chrono::steady_clock::time_point timestamp;
     };
     std::unordered_set<Nonce, NonceHash> redeemed_nonces;
-    std::vector<NonceEntry> nonce_entries;
+    std::deque<NonceEntry> nonce_entries;
     mutable std::mutex mutex;
 
     explicit Impl(TokenAuthenticatorConfig cfg)
@@ -73,30 +82,25 @@ struct TokenAuthenticator::Impl {
         auto now = std::chrono::steady_clock::now();
         auto cutoff = now - config.replay_window;
 
-        // Prune expired
-        nonce_entries.erase(
-            std::remove_if(nonce_entries.begin(), nonce_entries.end(),
-                [&](const NonceEntry& entry) {
-                    if (entry.timestamp < cutoff) {
-                        redeemed_nonces.erase(entry.nonce);
-                        return true;
-                    }
-                    return false;
-                }),
-            nonce_entries.end());
+        // Prune expired from front — O(k) where k = expired entries, amortized O(1)
+        while (!nonce_entries.empty() && nonce_entries.front().timestamp < cutoff) {
+            redeemed_nonces.erase(nonce_entries.front().nonce);
+            nonce_entries.pop_front();
+        }
 
         // Enforce maximum size by removing oldest entries if at capacity
         size_t max_size = config.max_replay_cache_size > 0 ? config.max_replay_cache_size : DEFAULT_MAX_AUTHENTICATOR_CACHE_SIZE;
         while (redeemed_nonces.size() >= max_size && !nonce_entries.empty()) {
             redeemed_nonces.erase(nonce_entries.front().nonce);
-            nonce_entries.erase(nonce_entries.begin());
+            nonce_entries.pop_front();
         }
 
-        if (redeemed_nonces.count(nonce) > 0) {
+        // Single hash lookup: insert returns whether element was new
+        auto [it, inserted] = redeemed_nonces.insert(nonce);
+        if (!inserted) {
             return false;
         }
 
-        redeemed_nonces.insert(nonce);
         nonce_entries.push_back({nonce, now});
         return true;
     }
@@ -125,7 +129,12 @@ void TokenAuthenticator::add_trusted_key(
         }
     }
 
-    impl_->rsa_keys[std::string(issuer_name)].push_back(std::move(key));
+    auto it = impl_->rsa_keys.find(issuer_name);
+    if (it != impl_->rsa_keys.end()) {
+        it->second.push_back(std::move(key));
+    } else {
+        impl_->rsa_keys[std::string(issuer_name)].push_back(std::move(key));
+    }
 }
 
 void TokenAuthenticator::add_trusted_key(
@@ -143,19 +152,26 @@ void TokenAuthenticator::add_trusted_key(
         }
     }
 
-    impl_->voprf_keys[std::string(issuer_name)].push_back(std::move(key));
+    auto it = impl_->voprf_keys.find(issuer_name);
+    if (it != impl_->voprf_keys.end()) {
+        it->second.push_back(std::move(key));
+    } else {
+        impl_->voprf_keys[std::string(issuer_name)].push_back(std::move(key));
+    }
 }
 
 void TokenAuthenticator::remove_trusted_issuer(std::string_view issuer_name) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    impl_->rsa_keys.erase(std::string(issuer_name));
-    impl_->voprf_keys.erase(std::string(issuer_name));
+    auto rsa_it = impl_->rsa_keys.find(issuer_name);
+    if (rsa_it != impl_->rsa_keys.end()) impl_->rsa_keys.erase(rsa_it);
+    auto voprf_it = impl_->voprf_keys.find(issuer_name);
+    if (voprf_it != impl_->voprf_keys.end()) impl_->voprf_keys.erase(voprf_it);
 }
 
 bool TokenAuthenticator::is_trusted(std::string_view issuer_name) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return impl_->rsa_keys.count(std::string(issuer_name)) > 0 ||
-           impl_->voprf_keys.count(std::string(issuer_name)) > 0;
+    return impl_->rsa_keys.find(issuer_name) != impl_->rsa_keys.end() ||
+           impl_->voprf_keys.find(issuer_name) != impl_->voprf_keys.end();
 }
 
 Result<TokenChallenge> TokenAuthenticator::create_challenge(
@@ -197,7 +213,9 @@ ValidationResult TokenAuthenticator::validate(
             "Failed to compute challenge digest");
     }
 
-    if (token.challenge_digest != *expected_digest) {
+    if (!constant_time_equal(
+            ByteView(token.challenge_digest.data(), token.challenge_digest.size()),
+            ByteView(expected_digest->data(), expected_digest->size()))) {
         return ValidationResult::failure(
             ErrorCode::INVALID_CHALLENGE,
             "Challenge digest mismatch");
@@ -227,7 +245,7 @@ ValidationResult TokenAuthenticator::validate_and_redeem(
     std::lock_guard<std::mutex> lock(impl_->mutex);
 
     // Check if this would be a replay (without adding to cache yet)
-    if (impl_->redeemed_nonces.count(token.nonce) > 0) {
+    if (impl_->redeemed_nonces.find(token.nonce) != impl_->redeemed_nonces.end()) {
         return ValidationResult::failure(
             ErrorCode::TOKEN_REPLAYED,
             "Token has already been redeemed");
@@ -247,7 +265,9 @@ ValidationResult TokenAuthenticator::validate_and_redeem(
             "Failed to compute challenge digest");
     }
 
-    if (token.challenge_digest != *expected_digest) {
+    if (!constant_time_equal(
+            ByteView(token.challenge_digest.data(), token.challenge_digest.size()),
+            ByteView(expected_digest->data(), expected_digest->size()))) {
         return ValidationResult::failure(
             ErrorCode::INVALID_CHALLENGE,
             "Challenge digest mismatch");
@@ -280,7 +300,7 @@ ValidationResult TokenAuthenticator::validate_and_redeem(
 
 bool TokenAuthenticator::would_be_replay(const Token& token) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return impl_->redeemed_nonces.count(token.nonce) > 0;
+    return impl_->redeemed_nonces.find(token.nonce) != impl_->redeemed_nonces.end();
 }
 
 void TokenAuthenticator::mark_redeemed(const Token& token) {
@@ -299,16 +319,10 @@ void TokenAuthenticator::prune_redemption_cache() {
     auto now = std::chrono::steady_clock::now();
     auto cutoff = now - impl_->config.replay_window;
 
-    impl_->nonce_entries.erase(
-        std::remove_if(impl_->nonce_entries.begin(), impl_->nonce_entries.end(),
-            [&](const Impl::NonceEntry& entry) {
-                if (entry.timestamp < cutoff) {
-                    impl_->redeemed_nonces.erase(entry.nonce);
-                    return true;
-                }
-                return false;
-            }),
-        impl_->nonce_entries.end());
+    while (!impl_->nonce_entries.empty() && impl_->nonce_entries.front().timestamp < cutoff) {
+        impl_->redeemed_nonces.erase(impl_->nonce_entries.front().nonce);
+        impl_->nonce_entries.pop_front();
+    }
 }
 
 const TokenAuthenticatorConfig& TokenAuthenticator::config() const {

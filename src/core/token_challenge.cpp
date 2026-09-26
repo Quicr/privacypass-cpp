@@ -111,9 +111,9 @@ Result<TokenChallenge> TokenChallenge::deserialize(ByteView data) {
         return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read issuer_name"});
     }
 
-    if (*issuer_len == 0) {
+    if (*issuer_len == 0 || *issuer_len > 0xFFFF) {
         return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
-            "issuer_name must not be empty"});
+            "issuer_name length must be 1..65535"});
     }
 
     TokenChallenge challenge;
@@ -155,8 +155,13 @@ Result<TokenChallenge> TokenChallenge::deserialize(ByteView data) {
             reinterpret_cast<const char*>(origin_bytes->data()),
             origin_bytes->size());
 
+        constexpr size_t MAX_ORIGIN_ENTRIES = 100;
         size_t pos = 0;
         while (pos < origin_str.size()) {
+            if (challenge.origin_info.size() >= MAX_ORIGIN_ENTRIES) {
+                return std::unexpected(Error{ErrorCode::MALFORMED_DATA,
+                    "Too many origin_info entries (max 100)"});
+            }
             size_t comma = origin_str.find(',', pos);
             std::string entry;
             if (comma == std::string::npos) {
@@ -182,6 +187,9 @@ Result<TokenChallenge> TokenChallenge::deserialize(ByteView data) {
 }
 
 Result<ChallengeDigest> TokenChallenge::digest() const {
+    // Benign race: multiple threads may compute simultaneously, but the result
+    // is deterministic (same input → same hash), so concurrent writes to
+    // cached_digest_ are harmless — all store the same value.
     if (cached_digest_) {
         return *cached_digest_;
     }

@@ -169,6 +169,9 @@ public:
                              : ByteView(data_.data(), data_.size());
     }
 
+    // Returns true if any write operation failed due to buffer overflow
+    [[nodiscard]] bool has_overflow() const noexcept { return overflow_; }
+
     [[nodiscard]] Bytes take() {
         if (use_external_) {
             return Bytes(external_buffer_.data(), external_buffer_.data() + pos_);
@@ -179,7 +182,7 @@ public:
     // Write single byte
     bool write_u8(uint8_t value) {
         if (use_external_) {
-            if (pos_ >= external_buffer_.size()) return false;
+            if (pos_ >= external_buffer_.size()) { overflow_ = true; return false; }
             external_buffer_[pos_++] = value;
         } else {
             data_.push_back(value);
@@ -190,7 +193,7 @@ public:
     // Write big-endian uint16
     bool write_u16(uint16_t value) {
         if (use_external_) {
-            if (pos_ + 2 > external_buffer_.size()) return false;
+            if (pos_ + 2 > external_buffer_.size()) { overflow_ = true; return false; }
             external_buffer_[pos_++] = static_cast<uint8_t>(value >> 8);
             external_buffer_[pos_++] = static_cast<uint8_t>(value);
         } else {
@@ -203,7 +206,7 @@ public:
     // Write big-endian uint32
     bool write_u32(uint32_t value) {
         if (use_external_) {
-            if (pos_ + 4 > external_buffer_.size()) return false;
+            if (pos_ + 4 > external_buffer_.size()) { overflow_ = true; return false; }
             external_buffer_[pos_++] = static_cast<uint8_t>(value >> 24);
             external_buffer_[pos_++] = static_cast<uint8_t>(value >> 16);
             external_buffer_[pos_++] = static_cast<uint8_t>(value >> 8);
@@ -244,7 +247,7 @@ public:
     // Write bytes
     bool write_bytes(ByteView bytes) {
         if (use_external_) {
-            if (pos_ + bytes.size() > external_buffer_.size()) return false;
+            if (pos_ + bytes.size() > external_buffer_.size()) { overflow_ = true; return false; }
             std::copy(bytes.begin(), bytes.end(), external_buffer_.data() + pos_);
             pos_ += bytes.size();
         } else {
@@ -292,6 +295,7 @@ private:
     MutableByteView external_buffer_;
     size_t pos_ = 0;
     bool use_external_ = false;
+    bool overflow_ = false;
 };
 
 // Base64url encoding/decoding (RFC 4648)

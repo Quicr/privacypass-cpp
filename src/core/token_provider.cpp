@@ -17,27 +17,34 @@ namespace {
 struct DigestHash {
     size_t operator()(const ChallengeDigest& digest) const {
         size_t hash = 0;
-        for (size_t i = 0; i < digest.size(); i += sizeof(size_t)) {
-            size_t chunk = 0;
-            std::memcpy(&chunk, digest.data() + i, std::min(sizeof(size_t), digest.size() - i));
-            hash ^= chunk + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-        }
+        std::memcpy(&hash, digest.data(), sizeof(size_t));
         return hash;
     }
+};
+
+// Transparent hash/equal for heterogeneous string_view lookup
+struct StringHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view sv) const { return std::hash<std::string_view>{}(sv); }
+    size_t operator()(const std::string& s) const { return std::hash<std::string_view>{}(s); }
+};
+struct StringEqual {
+    using is_transparent = void;
+    bool operator()(std::string_view a, std::string_view b) const { return a == b; }
 };
 
 }  // namespace
 
 struct TokenProvider::Impl {
     TokenProviderConfig config;
-    std::unordered_map<std::string, std::vector<PublicKey>> issuer_keys;
+    std::unordered_map<std::string, std::vector<PublicKey>, StringHash, StringEqual> issuer_keys;
     std::unordered_map<ChallengeDigest, std::vector<Token>, DigestHash> token_cache;
     mutable std::mutex mutex;
 
     explicit Impl(TokenProviderConfig cfg) : config(std::move(cfg)) {}
 
     std::optional<PublicKey> find_key(std::string_view issuer, TokenType type) const {
-        auto it = issuer_keys.find(std::string(issuer));
+        auto it = issuer_keys.find(issuer);
         if (it == issuer_keys.end()) {
             return std::nullopt;
         }
@@ -84,17 +91,23 @@ TokenProvider& TokenProvider::operator=(TokenProvider&&) noexcept = default;
 
 void TokenProvider::add_issuer_key(std::string_view issuer_name, PublicKey key) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    impl_->issuer_keys[std::string(issuer_name)].push_back(std::move(key));
+    auto it = impl_->issuer_keys.find(issuer_name);
+    if (it != impl_->issuer_keys.end()) {
+        it->second.push_back(std::move(key));
+    } else {
+        impl_->issuer_keys[std::string(issuer_name)].push_back(std::move(key));
+    }
 }
 
 void TokenProvider::remove_issuer(std::string_view issuer_name) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    impl_->issuer_keys.erase(std::string(issuer_name));
+    auto it = impl_->issuer_keys.find(issuer_name);
+    if (it != impl_->issuer_keys.end()) impl_->issuer_keys.erase(it);
 }
 
 bool TokenProvider::has_issuer(std::string_view issuer_name) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return impl_->issuer_keys.count(std::string(issuer_name)) > 0;
+    return impl_->issuer_keys.find(issuer_name) != impl_->issuer_keys.end();
 }
 
 std::optional<PublicKey> TokenProvider::get_issuer_key(

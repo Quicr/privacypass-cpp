@@ -3,6 +3,7 @@
 #include <privacy_pass/core/issuer.hpp>
 
 #include <spdlog/spdlog.h>
+#include <optional>
 #include <unordered_map>
 
 namespace privacy_pass {
@@ -100,25 +101,22 @@ uint8_t PublicIssuer::truncated_key_id() const {
 // PrivateIssuer implementation
 struct PrivateIssuer::Impl {
     crypto::VoprfPrivateKey private_key;
-    crypto::VoprfServer server;
+    std::optional<crypto::VoprfServer> server;
     TokenKeyId key_id;
     uint8_t truncated_key_id;
 
-    Impl(crypto::VoprfPrivateKey key)
-        : private_key(std::move(key)), server(crypto::VoprfPrivateKey{}) {
-        // Need to reconstruct server with proper key
-    }
+    explicit Impl(crypto::VoprfPrivateKey key) : private_key(std::move(key)) {}
 };
 
 PrivateIssuer::PrivateIssuer(crypto::VoprfPrivateKey private_key)
     : impl_(std::make_unique<Impl>(std::move(private_key))) {
 
-    // Reconstruct server with the key
+    // Construct server with a copy of the key
     auto key_bytes = impl_->private_key.to_bytes();
     if (key_bytes) {
         auto key_copy = crypto::VoprfPrivateKey::from_bytes(key_bytes->view());
         if (key_copy) {
-            impl_->server = crypto::VoprfServer(std::move(*key_copy));
+            impl_->server.emplace(std::move(*key_copy));
         }
     }
 
@@ -156,7 +154,12 @@ Result<TokenResponse> PrivateIssuer::issue(const TokenRequest& request) const {
             "Unknown key ID"});
     }
 
-    auto evaluation = impl_->server.blind_evaluate(
+    if (!impl_->server) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR,
+            "VOPRF server not initialized"});
+    }
+
+    auto evaluation = impl_->server->blind_evaluate(
         ByteView(request.blinded_msg.data(), request.blinded_msg.size()));
 
     if (!evaluation) {
@@ -212,7 +215,12 @@ Result<bool> PrivateIssuer::verify(const Token& token) const {
         return std::unexpected(auth_input_bytes.error());
     }
 
-    return impl_->server.verify_finalize(
+    if (!impl_->server) {
+        return std::unexpected(Error{ErrorCode::CRYPTO_ERROR,
+            "VOPRF server not initialized"});
+    }
+
+    return impl_->server->verify_finalize(
         ByteView(auth_input_bytes->data(), auth_input_bytes->size()),
         ByteView(token.authenticator.data(), token.authenticator.size()));
 }
@@ -221,11 +229,7 @@ Result<bool> PrivateIssuer::verify(const Token& token) const {
 struct TokenKeyIdHash {
     size_t operator()(const TokenKeyId& key_id) const {
         size_t hash = 0;
-        for (size_t i = 0; i < key_id.size(); i += sizeof(size_t)) {
-            size_t chunk = 0;
-            std::memcpy(&chunk, key_id.data() + i, std::min(sizeof(size_t), key_id.size() - i));
-            hash ^= chunk + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-        }
+        std::memcpy(&hash, key_id.data(), sizeof(size_t));
         return hash;
     }
 };

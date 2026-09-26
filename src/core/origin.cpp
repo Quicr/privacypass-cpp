@@ -5,6 +5,7 @@
 
 #include <spdlog/spdlog.h>
 #include <chrono>
+#include <deque>
 #include <mutex>
 #include <unordered_set>
 
@@ -15,11 +16,7 @@ namespace {
 struct NonceHash {
     size_t operator()(const Nonce& nonce) const {
         size_t hash = 0;
-        for (size_t i = 0; i < nonce.size(); i += sizeof(size_t)) {
-            size_t chunk = 0;
-            std::memcpy(&chunk, nonce.data() + i, std::min(sizeof(size_t), nonce.size() - i));
-            hash ^= chunk + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-        }
+        std::memcpy(&hash, nonce.data(), sizeof(size_t));
         return hash;
     }
 };
@@ -43,7 +40,7 @@ struct ReplayCache::Impl {
 
     std::unordered_map<BucketKey, Bucket> buckets;
     std::unordered_set<Nonce, NonceHash> all_nonces;  // global dedup set
-    std::vector<BucketKey> bucket_order;  // ordered list of active buckets
+    std::deque<BucketKey> bucket_order;  // ordered list of active buckets, O(1) front pop
     uint64_t window_seconds;
     size_t max_size;
     mutable std::mutex mutex;
@@ -75,7 +72,7 @@ struct ReplayCache::Impl {
                 }
                 buckets.erase(it);
             }
-            bucket_order.erase(bucket_order.begin());
+            bucket_order.pop_front();
         }
         // Enforce max size by dropping oldest buckets
         while (all_nonces.size() > max_size && !bucket_order.empty()) {
@@ -86,7 +83,7 @@ struct ReplayCache::Impl {
                 }
                 buckets.erase(it);
             }
-            bucket_order.erase(bucket_order.begin());
+            bucket_order.pop_front();
         }
     }
 };
@@ -104,13 +101,13 @@ bool ReplayCache::check_and_add(const Nonce& nonce) {
     auto tick = impl_->current_tick();
     impl_->prune_expired(tick);
 
-    // Check if nonce exists
-    if (impl_->all_nonces.count(nonce) > 0) {
+    // Single hash lookup: insert returns whether element was new
+    auto [it, inserted] = impl_->all_nonces.insert(nonce);
+    if (!inserted) {
         return false;  // Replay detected
     }
 
-    // Add to global set and to the current time bucket
-    impl_->all_nonces.insert(nonce);
+    // Add to the current time bucket
     auto& bucket = impl_->buckets[tick];
     if (bucket.nonces.empty()) {
         impl_->bucket_order.push_back(tick);
@@ -122,7 +119,7 @@ bool ReplayCache::check_and_add(const Nonce& nonce) {
 
 bool ReplayCache::contains(const Nonce& nonce) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return impl_->all_nonces.count(nonce) > 0;
+    return impl_->all_nonces.find(nonce) != impl_->all_nonces.end();
 }
 
 void ReplayCache::prune() {
@@ -139,11 +136,7 @@ size_t ReplayCache::size() const {
 struct TokenKeyIdHash {
     size_t operator()(const TokenKeyId& id) const {
         size_t hash = 0;
-        for (size_t i = 0; i < id.size(); i += sizeof(size_t)) {
-            size_t chunk = 0;
-            std::memcpy(&chunk, id.data() + i, std::min(sizeof(size_t), id.size() - i));
-            hash ^= chunk + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-        }
+        std::memcpy(&hash, id.data(), sizeof(size_t));
         return hash;
     }
 };
@@ -220,7 +213,9 @@ Result<bool> PublicOrigin::verify(
         return std::unexpected(expected_digest.error());
     }
 
-    if (token.challenge_digest != *expected_digest) {
+    if (!constant_time_equal(
+            ByteView(token.challenge_digest.data(), token.challenge_digest.size()),
+            ByteView(expected_digest->data(), expected_digest->size()))) {
         return std::unexpected(Error{ErrorCode::INVALID_CHALLENGE,
             "Challenge digest mismatch"});
     }
@@ -355,7 +350,9 @@ Result<bool> PrivateOrigin::validate_structure(
         return std::unexpected(expected_digest.error());
     }
 
-    if (token.challenge_digest != *expected_digest) {
+    if (!constant_time_equal(
+            ByteView(token.challenge_digest.data(), token.challenge_digest.size()),
+            ByteView(expected_digest->data(), expected_digest->size()))) {
         return std::unexpected(Error{ErrorCode::INVALID_CHALLENGE,
             "Challenge digest mismatch"});
     }
@@ -395,27 +392,39 @@ Origin& Origin::operator=(Origin&&) noexcept = default;
 void Origin::add_blind_rsa_key(crypto::BlindRsaPublicKey key) {
     impl_->rsa_keys.push_back(std::move(key));
 
-    // Recreate public origin with updated keys
-    std::vector<crypto::BlindRsaPublicKey> keys_copy;
-    for (const auto& k : impl_->rsa_keys) {
-        auto spki = k.to_spki();
+    // Create PublicOrigin lazily on first key, then add directly
+    if (!impl_->public_origin) {
+        // First key: create with a copy of just this key
+        auto spki = impl_->rsa_keys.back().to_spki();
         if (spki) {
             auto copy = crypto::BlindRsaPublicKey::from_spki(
                 ByteView(spki->data(), spki->size()));
             if (copy) {
-                keys_copy.push_back(std::move(*copy));
+                std::vector<crypto::BlindRsaPublicKey> keys;
+                keys.push_back(std::move(*copy));
+                impl_->public_origin = std::make_unique<PublicOrigin>(
+                    impl_->config, std::move(keys));
+            }
+        }
+    } else {
+        // Add incrementally — O(1) per key instead of O(n)
+        auto spki = impl_->rsa_keys.back().to_spki();
+        if (spki) {
+            auto copy = crypto::BlindRsaPublicKey::from_spki(
+                ByteView(spki->data(), spki->size()));
+            if (copy) {
+                impl_->public_origin->add_issuer_key(std::move(*copy));
             }
         }
     }
-
-    impl_->public_origin = std::make_unique<PublicOrigin>(
-        impl_->config, std::move(keys_copy));
 }
 
 void Origin::add_voprf_key(crypto::VoprfPublicKey key) {
     impl_->voprf_keys.push_back(std::move(key));
 
+    // Recreate PrivateOrigin — VOPRF keys are typically few, so full rebuild is acceptable
     std::vector<crypto::VoprfPublicKey> keys_copy;
+    keys_copy.reserve(impl_->voprf_keys.size());
     for (const auto& k : impl_->voprf_keys) {
         auto bytes = k.to_bytes();
         if (bytes) {

@@ -3,6 +3,7 @@
 #include <privacy_pass/http/auth_scheme.hpp>
 
 #include <spdlog/spdlog.h>
+#include <limits>
 #include <regex>
 
 namespace privacy_pass::http {
@@ -206,7 +207,10 @@ Result<std::vector<ChallengeHeader>> ChallengeHeader::parse_all(std::string_view
                 result.token_key = std::move(param->second);
             } else if (param->first == "max-age") {
                 try {
-                    result.max_age = static_cast<uint32_t>(std::stoul(param->second));
+                    auto val = std::stoul(param->second);
+                    if (val <= std::numeric_limits<uint32_t>::max()) {
+                        result.max_age = static_cast<uint32_t>(val);
+                    }
                 } catch (...) {
                     // Ignore invalid max-age
                 }
