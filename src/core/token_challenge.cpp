@@ -111,9 +111,9 @@ Result<TokenChallenge> TokenChallenge::deserialize(ByteView data) {
         return std::unexpected(Error{ErrorCode::UNEXPECTED_END, "Failed to read issuer_name"});
     }
 
-    if (*issuer_len == 0 || *issuer_len > 0xFFFF) {
+    if (*issuer_len == 0) {
         return std::unexpected(Error{ErrorCode::INVALID_LENGTH,
-            "issuer_name length must be 1..65535"});
+            "issuer_name must not be empty"});
     }
 
     TokenChallenge challenge;
